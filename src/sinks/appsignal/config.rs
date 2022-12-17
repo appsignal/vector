@@ -61,8 +61,7 @@ impl AppsignalSinkConfig {
     }
 
     fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
-        // TODO use uri that returns 200 ok with successfull auth and empty body
-        Ok(healthcheck(client, self.endpoint.uri.clone()).boxed())
+        Ok(healthcheck(client, endpoint_uri(&self.endpoint.uri, "vector/healthcheck", None)).boxed())
     }
 
     fn build_sink(&self, _cx: SinkContext, client: HttpClient) -> crate::Result<VectorSink> {
@@ -117,7 +116,7 @@ impl HttpSink for AppsignalSinkConfig {
     }
 
     async fn build_request(&self, events: Self::Output) -> crate::Result<Request<Bytes>> {
-        let uri = metrics_uri(&self.endpoint.uri, self.api_key.as_deref());
+        let uri = endpoint_uri(&self.endpoint.uri, "vector/events", self.api_key.as_deref());
 
         let mut builder = Request::post(&uri).header("Content-Type", "application/json");
 
@@ -129,12 +128,13 @@ impl HttpSink for AppsignalSinkConfig {
     }
 }
 
-fn metrics_uri(uri: &Uri, api_key: Option<&str>) -> Uri {
+fn endpoint_uri(uri: &Uri, path: &str, api_key: Option<&str>) -> Uri {
     let mut uri = uri.to_string();
     if !uri.ends_with('/') {
         uri.push('/');
     }
-    uri.push_str("vector?api_key=");
+    uri.push_str(path);
+    uri.push_str("?api_key=");
     if let Some(api_key) = api_key {
         uri.push_str(api_key);
     }
@@ -151,23 +151,41 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_uri() {
-        let uri = metrics_uri(
+    fn test_endpoint_uri() {
+        let uri = endpoint_uri(
             &"https://appsignal-endpoint.net".parse().unwrap(),
+            "vector/events",
             Some("api-key"),
         );
         assert_eq!(
             uri.to_string(),
-            "https://appsignal-endpoint.net/metrics/json?api_key=api-key"
+            "https://appsignal-endpoint.net/vector/events?api_key=api-key"
         );
     }
 
     #[test]
-    fn test_metrics_uri_no_key() {
-        let uri = metrics_uri(&"https://appsignal-endpoint.net".parse().unwrap(), None);
+    fn test_endpoint_uri_trailing_slash() {
+        let uri = endpoint_uri(
+            &"https://appsignal-endpoint.net/".parse().unwrap(),
+            "vector/events",
+            Some("api-key"),
+        );
         assert_eq!(
             uri.to_string(),
-            "https://appsignal-endpoint.net/metrics/json?api_key="
+            "https://appsignal-endpoint.net/vector/events?api_key=api-key"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_uri_no_key() {
+        let uri = endpoint_uri(
+            &"https://appsignal-endpoint.net".parse().unwrap(),
+            "vector/events",
+            None
+        );
+        assert_eq!(
+            uri.to_string(),
+            "https://appsignal-endpoint.net/vector/events?api_key="
         );
     }
 }
