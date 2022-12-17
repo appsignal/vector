@@ -57,6 +57,7 @@ jobs:
         include:
           - test: 'amqp'
           - test: 'apex'
+          - test: 'appsignal'
           - test: 'aws'
           # Database container currently fails to start due to failing to validate the license
           #- test: 'axiom'
