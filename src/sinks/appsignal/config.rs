@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
 use futures::{FutureExt, SinkExt};
-use http::{Request, Uri};
+use http::{header, Request, Uri};
 use vector_common::sensitive_string::SensitiveString;
 use vector_config::configurable_component;
 
@@ -63,10 +63,10 @@ impl AppsignalSinkConfig {
     }
 
     fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
-        Ok(healthcheck(client, endpoint_uri(&self.endpoint.uri, "vector/healthcheck", &self.api_key)).boxed())
+        Ok(healthcheck(client, endpoint_uri(&self.endpoint.uri, "vector/healthcheck"), self.api_key.inner().to_owned()).boxed())
     }
 
-    fn build_sink(&self, _cx: SinkContext, client: HttpClient) -> crate::Result<VectorSink> {
+    fn build_sink(&self, client: HttpClient) -> crate::Result<VectorSink> {
         let batch = self.batch.into_batch_settings()?;
         let request = self.request.unwrap_with(&TowerRequestConfig::default());
         let sink = BatchedHttpSink::new(
@@ -96,7 +96,7 @@ impl SinkConfig for AppsignalSinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let client = self.build_http_client(&cx)?;
         let healthcheck = self.build_healthcheck(client.clone())?;
-        let sink = self.build_sink(cx, client)?;
+        let sink = self.build_sink(client)?;
 
         Ok((sink, healthcheck))
     }
@@ -121,26 +121,26 @@ impl HttpSink for AppsignalSinkConfig {
     }
 
     async fn build_request(&self, events: Self::Output) -> crate::Result<Request<Bytes>> {
-        let uri = endpoint_uri(&self.endpoint.uri, "vector/events", &self.api_key);
+        let uri = endpoint_uri(&self.endpoint.uri, "vector/events");
 
-        let mut builder = Request::post(&uri).header("Content-Type", "application/json");
+        let mut builder = Request::post(&uri)
+            .header(header::CONTENT_TYPE, "application/x-protobuf")
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.api_key.inner()));
 
         if let Some(ce) = self.compression.content_encoding() {
-            builder = builder.header("Content-Encoding", ce);
+            builder = builder.header(header::CONTENT_ENCODING, ce);
         }
 
         Ok(builder.body(events.freeze()).unwrap())
     }
 }
 
-fn endpoint_uri(uri: &Uri, path: &str, api_key: &SensitiveString) -> Uri {
+fn endpoint_uri(uri: &Uri, path: &str) -> Uri {
     let mut uri = uri.to_string();
     if !uri.ends_with('/') {
         uri.push('/');
     }
     uri.push_str(path);
-    uri.push_str("?api_key=");
-    uri.push_str(api_key.inner());
     uri.parse::<Uri>().expect("Could not parse uri")
 }
 
@@ -157,12 +157,11 @@ mod tests {
     fn test_endpoint_uri() {
         let uri = endpoint_uri(
             &"https://appsignal-endpoint.net".parse().unwrap(),
-            "vector/events",
-            &SensitiveString::from("api-key".to_string()),
+            "vector/events"
         );
         assert_eq!(
             uri.to_string(),
-            "https://appsignal-endpoint.net/vector/events?api_key=api-key"
+            "https://appsignal-endpoint.net/vector/events"
         );
     }
 
@@ -171,11 +170,10 @@ mod tests {
         let uri = endpoint_uri(
             &"https://appsignal-endpoint.net/".parse().unwrap(),
             "vector/events",
-            &SensitiveString::from("api-key".to_string()),
         );
         assert_eq!(
             uri.to_string(),
-            "https://appsignal-endpoint.net/vector/events?api_key=api-key"
+            "https://appsignal-endpoint.net/vector/events"
         );
     }
 }
