@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use futures::{FutureExt, SinkExt};
 use http::{Request, Uri};
+use vector_common::sensitive_string::SensitiveString;
 use vector_config::configurable_component;
 
 use crate::{
@@ -27,7 +28,7 @@ pub struct AppsignalSinkConfig {
     pub endpoint: UriSerde,
 
     /// AppSignal api key to use
-    pub api_key: Option<String>,
+    pub api_key: SensitiveString,
 
     #[configurable(derived)]
     #[serde(default = "Compression::gzip_default")]
@@ -116,7 +117,7 @@ impl HttpSink for AppsignalSinkConfig {
     }
 
     async fn build_request(&self, events: Self::Output) -> crate::Result<Request<Bytes>> {
-        let uri = endpoint_uri(&self.endpoint.uri, "vector/events", self.api_key.as_deref());
+        let uri = endpoint_uri(&self.endpoint.uri, "vector/events", &self.api_key);
 
         let mut builder = Request::post(&uri).header("Content-Type", "application/json");
 
@@ -128,16 +129,14 @@ impl HttpSink for AppsignalSinkConfig {
     }
 }
 
-fn endpoint_uri(uri: &Uri, path: &str, api_key: Option<&str>) -> Uri {
+fn endpoint_uri(uri: &Uri, path: &str, api_key: &str) -> Uri {
     let mut uri = uri.to_string();
     if !uri.ends_with('/') {
         uri.push('/');
     }
     uri.push_str(path);
     uri.push_str("?api_key=");
-    if let Some(api_key) = api_key {
-        uri.push_str(api_key);
-    }
+    uri.push_str(api_key);
     uri.parse::<Uri>().expect("Could not parse uri")
 }
 
