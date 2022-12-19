@@ -25,9 +25,10 @@ use crate::{
 #[serde(deny_unknown_fields)]
 pub struct AppsignalSinkConfig {
     /// AppSignal endpoint to use
+    // TODO make optional, we can provide a default in the code
     pub endpoint: UriSerde,
 
-    /// AppSignal api key to use
+    /// AppSignal log source key to use
     pub api_key: SensitiveString,
 
     #[configurable(derived)]
@@ -62,7 +63,7 @@ impl AppsignalSinkConfig {
     }
 
     fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
-        Ok(healthcheck(client, endpoint_uri(&self.endpoint.uri, "vector/healthcheck", None)).boxed())
+        Ok(healthcheck(client, endpoint_uri(&self.endpoint.uri, "vector/healthcheck", &self.api_key)).boxed())
     }
 
     fn build_sink(&self, _cx: SinkContext, client: HttpClient) -> crate::Result<VectorSink> {
@@ -83,7 +84,10 @@ impl AppsignalSinkConfig {
 
 impl GenerateConfig for AppsignalSinkConfig {
     fn generate_config() -> toml::Value {
-        toml::from_str(r#"endpoint = "https://appsignal-endpoint.net""#).unwrap()
+        toml::from_str(
+            r#"endpoint = "https://appsignal-endpoint.net"
+            api_key = "api-key""#
+        ).unwrap()
     }
 }
 
@@ -129,14 +133,14 @@ impl HttpSink for AppsignalSinkConfig {
     }
 }
 
-fn endpoint_uri(uri: &Uri, path: &str, api_key: &str) -> Uri {
+fn endpoint_uri(uri: &Uri, path: &str, api_key: &SensitiveString) -> Uri {
     let mut uri = uri.to_string();
     if !uri.ends_with('/') {
         uri.push('/');
     }
     uri.push_str(path);
     uri.push_str("?api_key=");
-    uri.push_str(api_key);
+    uri.push_str(api_key.inner());
     uri.parse::<Uri>().expect("Could not parse uri")
 }
 
@@ -154,7 +158,7 @@ mod tests {
         let uri = endpoint_uri(
             &"https://appsignal-endpoint.net".parse().unwrap(),
             "vector/events",
-            Some("api-key"),
+            &SensitiveString::from("api-key".to_string()),
         );
         assert_eq!(
             uri.to_string(),
@@ -167,24 +171,11 @@ mod tests {
         let uri = endpoint_uri(
             &"https://appsignal-endpoint.net/".parse().unwrap(),
             "vector/events",
-            Some("api-key"),
+            &SensitiveString::from("api-key".to_string()),
         );
         assert_eq!(
             uri.to_string(),
             "https://appsignal-endpoint.net/vector/events?api_key=api-key"
-        );
-    }
-
-    #[test]
-    fn test_endpoint_uri_no_key() {
-        let uri = endpoint_uri(
-            &"https://appsignal-endpoint.net".parse().unwrap(),
-            "vector/events",
-            None
-        );
-        assert_eq!(
-            uri.to_string(),
-            "https://appsignal-endpoint.net/vector/events?api_key="
         );
     }
 }
