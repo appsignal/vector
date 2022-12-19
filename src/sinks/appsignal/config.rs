@@ -8,7 +8,7 @@ use crate::{
     config::{AcknowledgementsConfig, DataType, GenerateConfig, Input, SinkConfig, SinkContext},
     http::HttpClient,
     sinks::{
-        appsignal::{healthcheck, encoder::AppsignalEventEncoder},
+        appsignal::{encoder::AppsignalEventEncoder, healthcheck},
         util::{
             http::{BatchedHttpSink, HttpSink},
             BatchConfig, Buffer, Compression, RealtimeSizeBasedDefaultBatchSettings,
@@ -63,7 +63,12 @@ impl AppsignalSinkConfig {
     }
 
     fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
-        Ok(healthcheck(client, endpoint_uri(&self.endpoint.uri, "vector/healthcheck"), self.api_key.inner().to_owned()).boxed())
+        Ok(healthcheck(
+            client,
+            endpoint_uri(&self.endpoint.uri, "vector/healthcheck"),
+            self.api_key.inner().to_owned(),
+        )
+        .boxed())
     }
 
     fn build_sink(&self, client: HttpClient) -> crate::Result<VectorSink> {
@@ -86,8 +91,9 @@ impl GenerateConfig for AppsignalSinkConfig {
     fn generate_config() -> toml::Value {
         toml::from_str(
             r#"endpoint = "https://appsignal-endpoint.net"
-            api_key = "api-key""#
-        ).unwrap()
+            api_key = "api-key""#,
+        )
+        .unwrap()
     }
 }
 
@@ -125,7 +131,10 @@ impl HttpSink for AppsignalSinkConfig {
 
         let mut builder = Request::post(&uri)
             .header(header::CONTENT_TYPE, "application/x-protobuf")
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.api_key.inner()));
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key.inner()),
+            );
 
         if let Some(ce) = self.compression.content_encoding() {
             builder = builder.header(header::CONTENT_ENCODING, ce);
@@ -157,7 +166,7 @@ mod tests {
     fn test_endpoint_uri() {
         let uri = endpoint_uri(
             &"https://appsignal-endpoint.net".parse().unwrap(),
-            "vector/events"
+            "vector/events",
         );
         assert_eq!(
             uri.to_string(),

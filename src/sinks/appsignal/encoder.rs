@@ -2,10 +2,7 @@ use bytes::{BufMut, BytesMut};
 use prost::Message;
 
 use crate::{
-    event::{
-        proto::EventWrapper,
-        Event,
-    },
+    event::{proto::EventWrapper, Event},
     sinks::util::http::HttpEventEncoder,
 };
 
