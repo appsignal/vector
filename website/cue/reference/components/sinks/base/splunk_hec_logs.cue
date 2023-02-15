@@ -40,9 +40,12 @@ base: components: sinks: splunk_hec_logs: configuration: {
 				type: uint: default: 1000000
 			}
 			query_interval: {
-				description: "The amount of time, in seconds, to wait in between queries to the Splunk HEC indexer acknowledgement endpoint."
+				description: "The amount of time to wait between queries to the Splunk HEC indexer acknowledgement endpoint."
 				required:    false
-				type: uint: default: 10
+				type: uint: {
+					default: 10
+					unit:    "seconds"
+				}
 			}
 			retry_limit: {
 				description: "The maximum number of times an acknowledgement ID will be queried for its status."
@@ -53,11 +56,14 @@ base: components: sinks: splunk_hec_logs: configuration: {
 	}
 	auto_extract_timestamp: {
 		description: """
-			Passes the auto_extract_timestamp option to Splunk.
-			Note this option is only used by Version 8 and above of Splunk.
-			This will cause Splunk to extract the timestamp from the message text rather than use
-			the timestamp embedded in the event. The timestamp must be in the format yyyy-mm-dd hh:mm:ss.
-			This option only applies for the `Event` endpoint target.
+			Passes the `auto_extract_timestamp` option to Splunk.
+
+			This option is only relevant to Splunk v8.x and above, and is only applied when
+			`endpoint_target` is set to `event`.
+
+			Setting this to `true` will cause Splunk to extract the timestamp from the message text
+			rather than use the timestamp embedded in the event. The timestamp must be in the format
+			`yyyy-mm-dd hh:mm:ss`.
 			"""
 		required: false
 		type: bool: {}
@@ -74,17 +80,23 @@ base: components: sinks: splunk_hec_logs: configuration: {
 					serialized / compressed.
 					"""
 				required: false
-				type: uint: {}
+				type: uint: {
+					default: 1000000
+					unit:    "bytes"
+				}
 			}
 			max_events: {
-				description: "The maximum size of a batch, in events, before it is flushed."
+				description: "The maximum size of a batch before it is flushed."
 				required:    false
-				type: uint: {}
+				type: uint: unit: "events"
 			}
 			timeout_secs: {
-				description: "The maximum age of a batch, in seconds, before it is flushed."
+				description: "The maximum age of a batch before it is flushed."
 				required:    false
-				type: float: {}
+				type: float: {
+					default: 1.0
+					unit:    "seconds"
+				}
 			}
 		}
 	}
@@ -105,7 +117,7 @@ base: components: sinks: splunk_hec_logs: configuration: {
 					"""
 				none: "No compression."
 				zlib: """
-					[Zlib]][zlib] compression.
+					[Zlib][zlib] compression.
 
 					[zlib]: https://zlib.net/
 					"""
@@ -185,9 +197,10 @@ base: components: sinks: splunk_hec_logs: configuration: {
 						could lead to the encoding emitting empty strings for the given event.
 						"""
 					text: """
-						Plaintext encoding.
+						Plain text encoding.
 
-						This "encoding" simply uses the `message` field of a log event.
+						This "encoding" simply uses the `message` field of a log event. For metrics, it uses an
+						encoding that resembles the Prometheus export format.
 
 						Users should take care if they're modifying their log events (such as by using a `remap`
 						transform, etc) and removing the message field while doing additional parsing on it, as this
@@ -199,6 +212,27 @@ base: components: sinks: splunk_hec_logs: configuration: {
 				description: "List of fields that will be excluded from the encoded event."
 				required:    false
 				type: array: items: type: string: {}
+			}
+			metric_tag_values: {
+				description: """
+					Controls how metric tag values are encoded.
+
+					When set to `single`, only the last non-bare value of tags will be displayed with the
+					metric.  When set to `full`, all metric tags will be exposed as separate assignments.
+					"""
+				relevant_when: "codec = \"json\" or codec = \"text\""
+				required:      false
+				type: string: {
+					default: "single"
+					enum: {
+						full: "All tags will be exposed as arrays of either string or null values."
+						single: """
+															Tag values will be exposed as single strings, the same as they were before this config
+															option. Tags with multiple values will show the last assigned value, and null values will be
+															ignored.
+															"""
+					}
+				}
 			}
 			only_fields: {
 				description: "List of fields that will be included in the encoded event."
@@ -216,9 +250,16 @@ base: components: sinks: splunk_hec_logs: configuration: {
 		}
 	}
 	endpoint: {
-		description: "The base URL of the Splunk instance."
-		required:    true
-		type: string: {}
+		description: """
+			The base URL of the Splunk instance.
+
+			The scheme (`http` or `https`) must be specified. No path should be included since the paths defined
+			by the [`Splunk`][splunk] API are used.
+
+			[splunk]: https://docs.splunk.com/Documentation/Splunk/8.0.0/Data/HECRESTendpoints
+			"""
+		required: true
+		type: string: examples: ["https://http-inputs-hec.splunkcloud.com", "https://hec.splunk.com:8088", "http://example.com"]
 	}
 	endpoint_target: {
 		description: "Splunk HEC endpoint configuration."
@@ -260,12 +301,15 @@ base: components: sinks: splunk_hec_logs: configuration: {
 	}
 	index: {
 		description: """
-			The name of the index where to send the events to.
+			The name of the index to send events to.
 
-			If not specified, the default index is used.
+			If not specified, the default index defined within Splunk is used.
 			"""
 		required: false
-		type: string: syntax: "template"
+		type: string: {
+			examples: ["{{ host }}", "custom_index"]
+			syntax: "template"
+		}
 	}
 	indexed_fields: {
 		description: """
@@ -276,7 +320,7 @@ base: components: sinks: splunk_hec_logs: configuration: {
 		required: false
 		type: array: {
 			default: []
-			items: type: string: {}
+			items: type: string: examples: ["field1", "field2"]
 		}
 	}
 	request: {
@@ -360,14 +404,20 @@ base: components: sinks: splunk_hec_logs: configuration: {
 				}
 			}
 			rate_limit_duration_secs: {
-				description: "The time window, in seconds, used for the `rate_limit_num` option."
+				description: "The time window used for the `rate_limit_num` option."
 				required:    false
-				type: uint: default: 1
+				type: uint: {
+					default: 1
+					unit:    "seconds"
+				}
 			}
 			rate_limit_num: {
 				description: "The maximum number of requests allowed within the `rate_limit_duration_secs` time window."
 				required:    false
-				type: uint: default: 9223372036854775807
+				type: uint: {
+					default: 9223372036854775807
+					unit:    "requests"
+				}
 			}
 			retry_attempts: {
 				description: """
@@ -376,7 +426,10 @@ base: components: sinks: splunk_hec_logs: configuration: {
 					The default, for all intents and purposes, represents an infinite number of retries.
 					"""
 				required: false
-				type: uint: default: 9223372036854775807
+				type: uint: {
+					default: 9223372036854775807
+					unit:    "retries"
+				}
 			}
 			retry_initial_backoff_secs: {
 				description: """
@@ -385,22 +438,31 @@ base: components: sinks: splunk_hec_logs: configuration: {
 					After the first retry has failed, the fibonacci sequence will be used to select future backoffs.
 					"""
 				required: false
-				type: uint: default: 1
+				type: uint: {
+					default: 1
+					unit:    "seconds"
+				}
 			}
 			retry_max_duration_secs: {
-				description: "The maximum amount of time, in seconds, to wait between retries."
+				description: "The maximum amount of time to wait between retries."
 				required:    false
-				type: uint: default: 3600
+				type: uint: {
+					default: 3600
+					unit:    "seconds"
+				}
 			}
 			timeout_secs: {
 				description: """
-					The maximum time a request can take before being aborted.
+					The time a request can take before being aborted.
 
 					It is highly recommended that you do not lower this value below the service’s internal timeout, as this could
 					create orphaned requests, pile on retries, and result in duplicate data downstream.
 					"""
 				required: false
-				type: uint: default: 60
+				type: uint: {
+					default: 60
+					unit:    "seconds"
+				}
 			}
 		}
 	}
@@ -413,7 +475,10 @@ base: components: sinks: splunk_hec_logs: configuration: {
 			If unset, the Splunk collector will set it.
 			"""
 		required: false
-		type: string: syntax: "template"
+		type: string: {
+			examples: ["{{ file }}", "/var/log/syslog", "UDP:514"]
+			syntax: "template"
+		}
 	}
 	sourcetype: {
 		description: """
@@ -422,18 +487,25 @@ base: components: sinks: splunk_hec_logs: configuration: {
 			If unset, Splunk will default to `httpevent`.
 			"""
 		required: false
-		type: string: syntax: "template"
+		type: string: {
+			examples: ["{{ sourcetype }}", "_json"]
+			syntax: "template"
+		}
 	}
 	timestamp_key: {
 		description: """
 			Overrides the name of the log field used to grab the timestamp to send to Splunk HEC.
+			When set to `“”`, vector omits setting a timestamp in the events sent to Splunk HEC.
 
 			By default, the [global `log_schema.timestamp_key` option][global_timestamp_key] is used.
 
 			[global_timestamp_key]: https://vector.dev/docs/reference/configuration/global-options/#log_schema.timestamp_key
 			"""
 		required: false
-		type: string: default: "timestamp"
+		type: string: {
+			default: "timestamp"
+			examples: ["timestamp", ""]
+		}
 	}
 	tls: {
 		description: "TLS configuration."

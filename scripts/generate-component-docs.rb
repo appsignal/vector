@@ -6,7 +6,7 @@ begin
   require 'tempfile'
 rescue LoadError => e
   puts "Load error: #{e.message}"
-  exit
+  exit 1
 end
 
 DEBUG_LEVEL = 1
@@ -277,7 +277,7 @@ def get_docs_type_for_value(schema, value)
     @logger.error "Schema instance type and value type are a mismatch, which should not happen."
     @logger.error "Schema instance type: #{schema_instance_type}"
     @logger.error "Value: #{value} (type: #{value_type})"
-    exit
+    exit 1
   end
 
   # For any numeric type, extract the value of `docs::numeric_type`, which must always be present in
@@ -287,8 +287,10 @@ def get_docs_type_for_value(schema, value)
   if ['number', 'integer'].include?(value_type)
     numeric_type = get_schema_metadata(schema, 'docs::numeric_type')
     if numeric_type.nil?
-      @logger.error "All fields with numeric types should have 'docs::numeric_type' metadata included."
-      exit
+      @logger.error "All fields with numeric types should have 'docs::numeric_type' metadata included." +
+        "e.g. #[configurable(metadata(docs::numeric_type = \"bytes\"))]"
+      @logger.error "Value: #{value} (type: #{value_type})"
+      exit 1
     end
 
     return numeric_type
@@ -461,7 +463,7 @@ def get_schema_by_name(root_schema, schema_name)
   schema_def = root_schema.dig('definitions', schema_name)
   if schema_def.nil?
     @logger.error "Could not find schema definition '#{schema_name}' in given schema."
-    exit
+    exit 1
   end
 
   schema_def
@@ -713,7 +715,7 @@ def resolve_schema_by_name(root_schema, schema_name)
     cycles with `#[configurable(metadata(docs::cycle_entrypoint))]`. As such a field will have no type \
     information rendered, it is advised to supply a sufficiently detailed field description that \
     describes the allowable values, etc."
-    exit
+    exit 1
   end
 
   # It wasn't already cached, so we actually have to resolve it.
@@ -807,6 +809,15 @@ def resolve_schema(root_schema, schema)
   description = get_rendered_description_from_schema(schema)
   resolved['description'] = description unless description.empty?
 
+  ## Resolve the deprecated flag. An optional deprecated message can also be set in the metadata.
+  if schema.fetch('deprecated', false)
+    resolved['deprecated'] = true
+    message = get_schema_metadata(schema, 'deprecated_message')
+    if message
+      resolved['deprecated_message'] = message
+    end
+  end
+
   # Reconcile the resolve schema, which essentially gives us a chance to, once the schema is
   # entirely resolved, check it for logical inconsistencies, fix up anything that we reasonably can,
   # and so on.
@@ -890,11 +901,18 @@ def resolve_bare_schema(root_schema, schema)
         # the wildcard property, we might want to have the description read as "A foobar label."
         # just to make the UI look nice.
         #
-        # Rather than try and derive this from the title/description on the field, we'll just allow
-        # for the possibility of specifying one for the wildcard property via the metadata attribute
-        # below. It's not technically required in the Cue schema, so it can indeed be optional.
+        # Rather than try and derive this from the title/description on the field, we'll require
+        # such a description to be provided on the Rust side via the metadata attribute shown below.
         singular_description = get_schema_metadata(schema, 'docs::additional_props_description')
-        additional_properties['description'] = singular_description unless singular_description.nil?
+        if singular_description.nil?
+          @logger.error "Missing 'docs::additional_props_description' metadata for a wildcard field.\n\n" \
+          "For map fields (`HashMap<...>`, etc), a description (in the singular form) must be provided by via `#[configurable(metadata(docs::additional_props_description = \"Description of the field.\"))]`.\n\n" \
+          "The description on the field, derived from the code comments, is shown specifically for `field`, while the description provided via `docs::additional_props_description` is shown for the special `field.*` entry that denotes that the field is actually a map."
+
+          @logger.error "Relevant schema: #{JSON.pretty_generate(schema)}"
+          exit 1
+        end
+        additional_properties['description'] = singular_description
 
         resolved_additional_properties = resolve_schema(root_schema, additional_properties)
         resolved_additional_properties['required'] = true
@@ -949,7 +967,7 @@ def resolve_bare_schema(root_schema, schema)
       grouped
     else
       @logger.error "Failed to resolve the schema. Schema: #{schema}"
-      exit
+      exit 1
     end
 
   { 'type' => resolved }
@@ -958,25 +976,43 @@ end
 def resolve_enum_schema(root_schema, schema)
   # Filter out all subschemas which are purely null schemas used for indicating optionality, as well
   # as any subschemas that are marked as being hidden.
+  is_optional = get_schema_metadata(schema, 'docs::optional')
   subschemas = schema['oneOf']
     .reject { |subschema| subschema['type'] == 'null' }
     .reject { |subschema| get_schema_metadata(subschema, 'docs::hidden') }
   subschema_count = subschemas.count
 
-  # If we only have one subschema after filtering, check to see if it's an `allOf` schema. If so, we
-  # unwrap it such that we end up with a copy of `schema` that looks like it was an `allOf` schema
-  # all along. We do this to properly resolve `allOf` schemas that were wrapped as `oneOf` w/ a null
-  # schema in order to establish optionality.
-  if subschema_count == 1 && get_json_schema_type(subschemas[0]) == 'all-of'
-    @logger.debug "Detected optional all-of schema, unwrapping all-of schema to resolve..."
+  # If we only have one subschema after filtering, check to see if it's an `allOf` or `oneOf` schema
+  # and `is_optional` is true.
+  #
+  # If it's an `allOf` subschema, then that means we originally had an `allOf` schema that we had to
+  # make optional, thus converting it to a `oneOf` with subschemas in the shape of `[null, allOf]`.
+  # In this case, we'll just remove the `oneOf` and move the `allOf` subschema up, as if it this
+  # schema was a `allOf` one all along.
+  #
+  # If so, we unwrap it such that we end up with a copy of `schema` that looks like it was an
+  # `allOf` schema all along. We do this to properly resolve `allOf` schemas that were wrapped as
+  # `oneOf` w/ a null schema in order to establish optionality.
+  if is_optional && subschema_count == 1
+    if get_json_schema_type(subschemas[0]) == 'all-of'
+      @logger.debug "Detected optional all-of schema, unwrapping all-of schema to resolve..."
 
-    # Copy the current schema and drop `oneOf` and set `allOf`, which will get us the correct
-    # unwrapped structure.
-    unwrapped_schema = deep_copy(schema)
-    unwrapped_schema.delete('oneOf')
-    unwrapped_schema['allOf'] = deep_copy(subschemas[0]['allOf'])
+      # Copy the current schema and drop `oneOf` and set `allOf` with the subschema, which will get us the correct
+      # unwrapped structure.
+      unwrapped_schema = deep_copy(schema)
+      unwrapped_schema.delete('oneOf')
+      unwrapped_schema['allOf'] = deep_copy(subschemas[0]['allOf'])
 
-    return { '_resolved' => resolve_schema(root_schema, unwrapped_schema) }
+      return { '_resolved' => resolve_schema(root_schema, unwrapped_schema) }
+    else
+      # For all other subschema types, we copy the current schema, drop the `oneOf`, and merge the
+      # subschema into it. This essentially unnests the schema.
+      unwrapped_schema = deep_copy(schema)
+      unwrapped_schema.delete('oneOf')
+      unwrapped_schema = schema_aware_nested_merge(unwrapped_schema, subschemas[0])
+
+      return { '_resolved' => resolve_schema(root_schema, unwrapped_schema) }
+    end
   end
 
   # Collect all of the tagging mode information upfront.
@@ -985,7 +1021,7 @@ def resolve_enum_schema(root_schema, schema)
     @logger.error 'Enum schemas should never be missing the metadata for the enum tagging mode.'
     @logger.error "Schema: #{JSON.pretty_generate(schema)}"
     @logger.error "Filter subschemas: #{JSON.pretty_generate(subschemas)}"
-    exit
+    exit 1
   end
 
   enum_tag_field = get_schema_metadata(schema, 'docs::enum_tag_field')
@@ -1098,12 +1134,12 @@ def resolve_enum_schema(root_schema, schema)
         if tag_value.nil?
           @logger.error 'All enum subschemas representing an internally-tagged enum must have the tag field use a const value.'
           @logger.error "Tag subschema: #{tag_subschema}"
-          exit
+          exit 1
         end
 
         if unique_tag_values.key?(tag_value)
           @logger.error "Found duplicate tag value '#{tag_value}' when resolving enum subschemas."
-          exit
+          exit 1
         end
 
         unique_tag_values[tag_value] = tag_subschema
@@ -1122,7 +1158,7 @@ def resolve_enum_schema(root_schema, schema)
               @logger.error "Had overlapping property '#{property_name}' from resolved enum subschema, but schemas differed:"
               @logger.error "Existing property schema (reduced): #{to_pretty_json(reduced_existing_property)}"
               @logger.error "New property schema (reduced): #{to_pretty_json(reduced_new_property)}"
-              exit
+              exit 1
             end
 
             @logger.debug "Adding relevant tag to existing resolved property schema for '#{property_name}'."
@@ -1185,8 +1221,14 @@ def resolve_enum_schema(root_schema, schema)
           }
         }
       }
+
       tag_description = get_schema_metadata(schema, 'docs::enum_tag_description')
-      resolved_tag_property['description'] = tag_description unless tag_description.nil?
+      if tag_description.nil?
+        @logger.error "A unique tag description must be specified for enums which are internally tagged (i.e. `#[serde(tag = \"...\")/`). This can be specified via `#[configurable(metadata(docs::enum_tag_description = \"...\"))]`."
+        @logger.error "Schema being generated: #{JSON.pretty_generate(schema)}"
+        exit 1
+      end
+      resolved_tag_property['description'] = tag_description
       unique_resolved_properties[enum_tag_field] = resolved_tag_property
 
       @logger.debug "Resolved as 'internally-tagged with named fields' enum schema."
@@ -1366,7 +1408,7 @@ def apply_schema_default_value!(source_schema, resolved_schema)
       Source schema: #{to_pretty_json(source_schema)} \
       Default value: #{to_pretty_json(default_value)} (type: #{default_value_type}) \
       Resolved schema: #{to_pretty_json(resolved_schema)}"
-      exit
+      exit 1
     end
 
     case default_value_type
@@ -1454,8 +1496,15 @@ def apply_schema_metadata!(source_schema, resolved_schema)
   # also work totally fine as-is!
   examples = get_schema_metadata(source_schema, 'docs::examples')
   if !examples.nil?
-    count = [examples].flatten.length
-    @logger.debug "Schema has #{count} example(s)."
+    flattened_examples = [examples].flatten.map { |example|
+      if example.is_a?(Hash)
+        sort_hash_nested(example)
+      else
+        example
+      end
+    }
+
+    @logger.debug "Schema has #{flattened_examples.length} example(s)."
     resolved_schema['type'].each { |type_name, type_def|
       # We need to recurse one more level if we're dealing with an array type definition, as we need
       # to stick the examples on the type definition for the array's `items`. There might also be
@@ -1464,11 +1513,11 @@ def apply_schema_metadata!(source_schema, resolved_schema)
       when 'array'
         type_def['items']['type'].each { |subtype_name, subtype_def|
           if subtype_name != 'array'
-            subtype_def['examples'] = [examples].flatten
+            subtype_def['examples'] = flattened_examples
           end
         }
       else
-        type_def['examples'] = [examples].flatten
+        type_def['examples'] = flattened_examples
       end
     }
   end
@@ -1487,7 +1536,7 @@ def apply_schema_metadata!(source_schema, resolved_schema)
   if !syntax_override.nil?
     if resolved_schema_type?(resolved_schema) != "string"
       @logger.error "Non-string schemas should not use the `syntax_override` metadata attribute."
-      exit
+      exit 1
     end
 
     resolved_schema['type']['string']['syntax'] = syntax_override.to_s
@@ -1499,7 +1548,7 @@ end
 # This provides a mechanism to fix up any inconsistencies that are created during the resolution
 # process that would otherwise be very complex to fix in the resolution codepath. Sometimes,
 # inconsistencies are only present after resolving merged subschemas, and so on, and so this
-# function serves as a spot to do such reconcilation, as it is called right before returning a
+# function serves as a spot to do such reconciliation, as it is called right before returning a
 # resolved schema.
 def reconcile_resolved_schema!(resolved_schema)
   @logger.debug "Reconciling resolved schema..."
@@ -1507,7 +1556,7 @@ def reconcile_resolved_schema!(resolved_schema)
   # Only works if `type` is an object, which it won't be in some cases, such as a schema that maps
   # to a cycle entrypoint, or is hidden, and so on.
   if !resolved_schema['type'].is_a?(Hash)
-    @logger.debug "Schema was not an full resolved schema; reconciliation not applicable."
+    @logger.debug "Schema was not a fully resolved schema; reconciliation not applicable."
     return
   end
 
@@ -1517,30 +1566,6 @@ def reconcile_resolved_schema!(resolved_schema)
   object_properties = resolved_schema.dig('type', 'object', 'options')
   if !object_properties.nil?
     object_properties.values.each { |resolved_property| reconcile_resolved_schema!(resolved_property) }
-
-    # Reconcile examples for wildcard object schemas.
-    #
-    # In some cases, a field may be set to an object schema with only "additional properties" set,
-    # which implies the type on the Rust side is just a map that can have any number of free-form
-    # key/value pairs.
-    #
-    # When specifying examples for that field, the examples land on the field's object type itself,
-    # when we actually need them to land on the schema for the object's wildcard property. We simply
-    # check if the object has a single property, `*`, which signals that we're dealing purely with a
-    # map field, and move any examples on the object itself down to the property's schema.
-    object_schema = resolved_schema.dig('type', 'object')
-    has_examples = object_schema.has_key?('examples')
-    is_map_field = object_properties.keys == ['*']
-
-    if has_examples && is_map_field
-      object_examples = object_schema.delete('examples')
-
-      # TODO: We blindly grab the first type field we can find, because we don't expect to handle
-      # this for map values that have multiple type representations.
-      wildcard_property_schema = object_properties['*']
-      wildcard_type_field = wildcard_property_schema['type'].values.first
-      wildcard_type_field['examples'] = object_examples
-    end
   else
     # Look for required/default value inconsistencies.
     #
@@ -1656,7 +1681,7 @@ def render_and_import_schema(root_schema, schema_name, friendly_name, config_map
   unwrapped_resolved_schema = resolved_schema.dig('type', 'object', 'options')
   if unwrapped_resolved_schema.nil?
     @logger.error 'Configuration types must always resolve to an object schema.'
-    exit
+    exit 1
   end
 
   unwrapped_resolved_schema = sort_hash_nested(unwrapped_resolved_schema)
@@ -1689,7 +1714,7 @@ def render_and_import_schema(root_schema, schema_name, friendly_name, config_map
   cue_output_file = "website/cue/reference/components/#{cue_relative_path}"
   unless system(@cue_binary_path, 'import', '-f', '-o', cue_output_file, '-p', 'metadata', json_output_file)
     @logger.error "[!]   Failed to import #{friendly_name} schema as valid Cue."
-    exit
+    exit 1
   end
   @logger.info "[✓]   Imported #{friendly_name} schema to '#{cue_output_file}'."
 end
@@ -1716,13 +1741,13 @@ end
 
 if ARGV.empty?
   puts 'usage: extract-component-schema.rb <configuration schema path>'
-  exit
+  exit 1
 end
 
 # Ensure that Cue is present since we need it to import our intermediate JSON representation.
 if @cue_binary_path.nil?
   puts 'Failed to find \'cue\' binary on the current path. Install \'cue\' (or make it available on the current path) and try again.'
-  exit
+  exit 1
 end
 
 schema_path = ARGV[0]

@@ -28,14 +28,22 @@ base: components: sinks: file: configuration: {
 		}
 	}
 	compression: {
-		description: "Compression algorithm."
+		description: "Compression configuration."
 		required:    false
 		type: string: {
 			default: "none"
 			enum: {
-				gzip: "Gzip compression."
+				gzip: """
+					[Gzip][gzip] compression.
+
+					[gzip]: https://www.gzip.org/
+					"""
 				none: "No compression."
-				zstd: "Zstandard compression."
+				zstd: """
+					[Zstandard][zstd] compression.
+
+					[zstd]: https://facebook.github.io/zstd/
+					"""
 			}
 		}
 	}
@@ -103,9 +111,10 @@ base: components: sinks: file: configuration: {
 						could lead to the encoding emitting empty strings for the given event.
 						"""
 					text: """
-						Plaintext encoding.
+						Plain text encoding.
 
-						This "encoding" simply uses the `message` field of a log event.
+						This "encoding" simply uses the `message` field of a log event. For metrics, it uses an
+						encoding that resembles the Prometheus export format.
 
 						Users should take care if they're modifying their log events (such as by using a `remap`
 						transform, etc) and removing the message field while doing additional parsing on it, as this
@@ -117,6 +126,27 @@ base: components: sinks: file: configuration: {
 				description: "List of fields that will be excluded from the encoded event."
 				required:    false
 				type: array: items: type: string: {}
+			}
+			metric_tag_values: {
+				description: """
+					Controls how metric tag values are encoded.
+
+					When set to `single`, only the last non-bare value of tags will be displayed with the
+					metric.  When set to `full`, all metric tags will be exposed as separate assignments.
+					"""
+				relevant_when: "codec = \"json\" or codec = \"text\""
+				required:      false
+				type: string: {
+					default: "single"
+					enum: {
+						full: "All tags will be exposed as arrays of either string or null values."
+						single: """
+															Tag values will be exposed as single strings, the same as they were before this config
+															option. Tags with multiple values will show the last assigned value, and null values will be
+															ignored.
+															"""
+					}
+				}
 			}
 			only_fields: {
 				description: "List of fields that will be included in the encoded event."
@@ -148,7 +178,8 @@ base: components: sinks: file: configuration: {
 				}
 			}
 			method: {
-				required: true
+				description: "The framing method."
+				required:    true
 				type: string: enum: {
 					bytes:               "Event data is not delimited at all."
 					character_delimited: "Event data is delimited by a single ASCII (7-bit) character."
@@ -164,16 +195,29 @@ base: components: sinks: file: configuration: {
 	}
 	idle_timeout_secs: {
 		description: """
-			The amount of time, in seconds, that a file can be idle and stay open.
+			The amount of time that a file can be idle and stay open.
 
 			After not receiving any events in this amount of time, the file will be flushed and closed.
 			"""
 		required: false
-		type: uint: {}
+		type: uint: {
+			default: 30
+			examples: [
+				600,
+			]
+			unit: "seconds"
+		}
 	}
 	path: {
-		description: "File name to write events to."
-		required:    true
-		type: string: syntax: "template"
+		description: """
+			File path to write events to.
+
+			Compression format extension must be explicit.
+			"""
+		required: true
+		type: string: {
+			examples: ["/tmp/vector-%Y-%m-%d.log", "/tmp/application-{{ application_id }}-%Y-%m-%d.log", "/tmp/vector-%Y-%m-%d.log.zst"]
+			syntax: "template"
+		}
 	}
 }

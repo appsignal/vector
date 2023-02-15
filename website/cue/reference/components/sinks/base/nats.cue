@@ -38,7 +38,7 @@ base: components: sinks: nats: configuration: {
 				type: object: options: path: {
 					description: "Path to credentials file."
 					required:    true
-					type: string: {}
+					type: string: examples: ["/etc/nats/nats.creds"]
 				}
 			}
 			nkey: {
@@ -67,24 +67,21 @@ base: components: sinks: nats: configuration: {
 				}
 			}
 			strategy: {
+				description: """
+					The strategy used to authenticate with the NATS server.
+
+					More information on NATS authentication, and the various authentication strategies, can be found in the
+					NATS [documentation][nats_auth_docs]. For TLS client certificate authentication specifically, see the
+					`tls` settings.
+
+					[nats_auth_docs]: https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro
+					"""
 				required: true
 				type: string: enum: {
-					credentials_file: """
-						Credentials file authentication.
-						([documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt))
-						"""
-					nkey: """
-						NKey authentication.
-						([documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/nkey_auth))
-						"""
-					token: """
-						Token authentication.
-						([documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/tokens))
-						"""
-					user_password: """
-						Username and password authentication.
-						([documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/username_password))
-						"""
+					credentials_file: "Credentials file authentication. (JWT-based)"
+					nkey:             "NKey authentication."
+					token:            "Token authentication."
+					user_password:    "Username/password authentication."
 				}
 			}
 			token: {
@@ -117,9 +114,18 @@ base: components: sinks: nats: configuration: {
 		}
 	}
 	connection_name: {
-		description: "A name assigned to the NATS connection."
-		required:    false
-		type: string: default: "vector"
+		description: """
+			A NATS [name][nats_connection_name] assigned to the NATS connection.
+
+			[nats_connection_name]: https://docs.nats.io/using-nats/developer/connecting/name
+			"""
+		required: false
+		type: string: {
+			default: "vector"
+			examples: [
+				"foo",
+			]
+		}
 	}
 	encoding: {
 		description: "Configures how events are encoded into raw bytes."
@@ -185,9 +191,10 @@ base: components: sinks: nats: configuration: {
 						could lead to the encoding emitting empty strings for the given event.
 						"""
 					text: """
-						Plaintext encoding.
+						Plain text encoding.
 
-						This "encoding" simply uses the `message` field of a log event.
+						This "encoding" simply uses the `message` field of a log event. For metrics, it uses an
+						encoding that resembles the Prometheus export format.
 
 						Users should take care if they're modifying their log events (such as by using a `remap`
 						transform, etc) and removing the message field while doing additional parsing on it, as this
@@ -199,6 +206,27 @@ base: components: sinks: nats: configuration: {
 				description: "List of fields that will be excluded from the encoded event."
 				required:    false
 				type: array: items: type: string: {}
+			}
+			metric_tag_values: {
+				description: """
+					Controls how metric tag values are encoded.
+
+					When set to `single`, only the last non-bare value of tags will be displayed with the
+					metric.  When set to `full`, all metric tags will be exposed as separate assignments.
+					"""
+				relevant_when: "codec = \"json\" or codec = \"text\""
+				required:      false
+				type: string: {
+					default: "single"
+					enum: {
+						full: "All tags will be exposed as arrays of either string or null values."
+						single: """
+															Tag values will be exposed as single strings, the same as they were before this config
+															option. Tags with multiple values will show the last assigned value, and null values will be
+															ignored.
+															"""
+					}
+				}
 			}
 			only_fields: {
 				description: "List of fields that will be included in the encoded event."
@@ -216,9 +244,16 @@ base: components: sinks: nats: configuration: {
 		}
 	}
 	subject: {
-		description: "The NATS subject to publish messages to."
-		required:    true
-		type: string: syntax: "template"
+		description: """
+			The NATS [subject][nats_subject] to publish messages to.
+
+			[nats_subject]: https://docs.nats.io/nats-concepts/subjects
+			"""
+		required: true
+		type: string: {
+			examples: ["{{ host }}", "foo", "time.us.east", "time.*.east", "time.>", ">"]
+			syntax: "template"
+		}
 	}
 	tls: {
 		description: "Configures the TLS options for incoming/outgoing connections."
@@ -317,11 +352,14 @@ base: components: sinks: nats: configuration: {
 	}
 	url: {
 		description: """
-			The NATS URL to connect to.
+			The NATS [URL][nats_url] to connect to.
 
 			The URL must take the form of `nats://server:port`.
+			If the port is not specified it defaults to 4222.
+
+			[nats_url]: https://docs.nats.io/using-nats/developer/connecting#nats-url
 			"""
 		required: true
-		type: string: {}
+		type: string: examples: ["nats://demo.nats.io", "nats://127.0.0.1:4242"]
 	}
 }

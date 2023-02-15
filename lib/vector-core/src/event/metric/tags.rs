@@ -19,8 +19,9 @@ use vrl_lib::prelude::fmt::Formatter;
 pub enum TagValue {
     /// Bare tag value.
     Bare,
+
     /// Tag value containing a string.
-    Value(#[configurable(transparent)] String),
+    Value(String),
 }
 
 impl From<String> for TagValue {
@@ -96,15 +97,17 @@ type TagValueRef<'a> = Option<&'a str>;
 pub enum TagValueSet {
     /// This represents a set containing no value.
     Empty,
+
     /// This represents a set containing a single value. This is stored separately to avoid the
     /// overhead of allocating a hash table for the common case of a single value for a tag.
-    Single(#[configurable(transparent)] TagValue),
+    Single(TagValue),
+
     /// This holds an actual set of values. This variant will be automatically created when a single
     /// value is added to, and reduced down to a single value when the length is reduced to 1.  An
     /// index set is used for this set, as it preserves the insertion order of the contained
     /// elements. This allows us to retrieve the last element inserted which in turn allows us to
     /// emulate the set having a single value.
-    Set(#[configurable(transparent)] IndexSet<TagValue>),
+    Set(IndexSet<TagValue>),
 }
 
 impl Default for TagValueSet {
@@ -120,7 +123,7 @@ impl Display for TagValueSet {
                 write!(f, ", ")?;
             }
             if let Some(value) = value {
-                write!(f, "\"{}\"", value)?;
+                write!(f, "\"{value}\"")?;
             } else {
                 write!(f, "null")?;
             }
@@ -153,6 +156,26 @@ impl TagValueSet {
                 .iter()
                 .rfind(|tag| tag.is_value())
                 .and_then(TagValue::as_option),
+        }
+    }
+
+    /// Reduce this tag set to either a simple single tag or an empty set.
+    fn reduce_to_simple(&mut self) {
+        match self {
+            Self::Empty => (),
+            Self::Single(tag) => {
+                if tag == &TagValue::Bare {
+                    *self = Self::Empty;
+                }
+            }
+            Self::Set(set) => {
+                // Extract the last element of the set that has a value and convert it back into
+                // self as a single value.
+                *self = std::mem::take(set)
+                    .into_iter()
+                    .rfind(TagValue::is_value)
+                    .map_or(Self::Empty, Self::Single);
+            }
         }
     }
 
@@ -435,9 +458,7 @@ impl Serialize for TagValueSet {
 /// Tags for a metric series.
 #[configurable_component]
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct MetricTags(
-    #[configurable(transparent)] pub(in crate::event) BTreeMap<String, TagValueSet>,
-);
+pub struct MetricTags(pub(in crate::event) BTreeMap<String, TagValueSet>);
 
 impl MetricTags {
     pub fn is_empty(&self) -> bool {
@@ -526,6 +547,15 @@ impl MetricTags {
 
     pub fn retain(&mut self, mut f: impl FnMut(&str, &mut TagValueSet) -> bool) {
         self.0.retain(|key, tags| f(key.as_str(), tags));
+    }
+
+    /// Reduces all the tag values to their single value, discarding any for which that value would
+    /// be null.
+    pub(super) fn reduce_to_single(&mut self) {
+        self.0
+            .iter_mut()
+            .for_each(|(_, values)| values.reduce_to_simple());
+        self.retain(|_, values| !values.is_empty());
     }
 }
 
@@ -616,6 +646,20 @@ mod tests {
 
     proptest! {
         #[test]
+        fn reduces_set_to_simple(mut values: TagValueSet) {
+            values.reduce_to_simple();
+            assert!(values.is_empty() || (values.len() == 1 && values.as_single().is_some()));
+        }
+
+        #[test]
+        fn reduces_tags_to_single(mut tags: MetricTags) {
+            tags.reduce_to_single();
+            for (_, values) in tags.iter_sets() {
+                assert!(values.is_empty() || (values.len() == 1 && values.as_single().is_some()));
+            }
+        }
+
+        #[test]
         fn eq_implies_hash_matches_proptest(values1: TagValueSet, values2: TagValueSet) {
             fn hash<T: Hash>(values: &T) -> u64 {
                 let mut hasher = DefaultHasher::default();
@@ -673,7 +717,7 @@ mod tests {
             assert!(set.contains(&addition));
 
             // If the addition wasn't in the start set, it will increase the length.
-            assert_eq!(set.len(), start_len + if new_addition { 1 } else { 0 });
+            assert_eq!(set.len(), start_len + usize::from(new_addition));
             // The "single" value will match the addition.
             assert_eq!(set.as_single(), addition.as_option());
         }
@@ -730,7 +774,7 @@ mod tests {
             assert!(set.contains(&addition));
 
             // If the addition wasn't in the start set, it will increase the length.
-            assert_eq!(set.len(), start_len + if new_addition { 1 } else { 0 });
+            assert_eq!(set.len(), start_len + usize::from(new_addition));
             // The "single" value will match the addition.
             if addition.is_value() {
                 assert_eq!(set.as_single(), addition.as_option());

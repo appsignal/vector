@@ -31,11 +31,13 @@ base: components: sinks: socket: configuration: {
 		description: """
 			The address to connect to.
 
+			Both IP address and hostname are accepted formats.
+
 			The address _must_ include a port.
 			"""
 		relevant_when: "mode = \"tcp\" or mode = \"udp\""
 		required:      true
-		type: string: {}
+		type: string: examples: ["92.12.333.224:5000", "https://somehost:5000"]
 	}
 	encoding: {
 		description: "Configures how events are encoded into raw bytes."
@@ -101,9 +103,10 @@ base: components: sinks: socket: configuration: {
 						could lead to the encoding emitting empty strings for the given event.
 						"""
 					text: """
-						Plaintext encoding.
+						Plain text encoding.
 
-						This "encoding" simply uses the `message` field of a log event.
+						This "encoding" simply uses the `message` field of a log event. For metrics, it uses an
+						encoding that resembles the Prometheus export format.
 
 						Users should take care if they're modifying their log events (such as by using a `remap`
 						transform, etc) and removing the message field while doing additional parsing on it, as this
@@ -115,6 +118,27 @@ base: components: sinks: socket: configuration: {
 				description: "List of fields that will be excluded from the encoded event."
 				required:    false
 				type: array: items: type: string: {}
+			}
+			metric_tag_values: {
+				description: """
+					Controls how metric tag values are encoded.
+
+					When set to `single`, only the last non-bare value of tags will be displayed with the
+					metric.  When set to `full`, all metric tags will be exposed as separate assignments.
+					"""
+				relevant_when: "codec = \"json\" or codec = \"text\""
+				required:      false
+				type: string: {
+					default: "single"
+					enum: {
+						full: "All tags will be exposed as arrays of either string or null values."
+						single: """
+															Tag values will be exposed as single strings, the same as they were before this config
+															option. Tags with multiple values will show the last assigned value, and null values will be
+															ignored.
+															"""
+					}
+				}
 			}
 			only_fields: {
 				description: "List of fields that will be included in the encoded event."
@@ -147,7 +171,8 @@ base: components: sinks: socket: configuration: {
 				}
 			}
 			method: {
-				required: true
+				description: "The framing method."
+				required:    true
 				type: string: enum: {
 					bytes:               "Event data is not delimited at all."
 					character_delimited: "Event data is delimited by a single ASCII (7-bit) character."
@@ -166,17 +191,18 @@ base: components: sinks: socket: configuration: {
 		relevant_when: "mode = \"tcp\""
 		required:      false
 		type: object: options: time_secs: {
-			description: "The time to wait, in seconds, before starting to send TCP keepalive probes on an idle connection."
+			description: "The time to wait before starting to send TCP keepalive probes on an idle connection."
 			required:    false
-			type: uint: {}
+			type: uint: unit: "seconds"
 		}
 	}
 	mode: {
-		required: true
+		description: "The type of socket to use."
+		required:    true
 		type: string: enum: {
-			tcp:  "TCP."
-			udp:  "UDP."
-			unix: "Unix Domain Socket."
+			tcp:  "Send over TCP."
+			udp:  "Send over UDP."
+			unix: "Send over a Unix domain socket (UDS)."
 		}
 	}
 	path: {
@@ -187,17 +213,22 @@ base: components: sinks: socket: configuration: {
 			"""
 		relevant_when: "mode = \"unix\""
 		required:      true
-		type: string: {}
+		type: string: examples: ["/path/to/socket"]
 	}
 	send_buffer_bytes: {
 		description: """
-			The size, in bytes, of the socket's send buffer.
+			The size of the socket's send buffer.
 
 			If set, the value of the setting is passed via the `SO_SNDBUF` option.
 			"""
 		relevant_when: "mode = \"tcp\" or mode = \"udp\""
 		required:      false
-		type: uint: {}
+		type: uint: {
+			examples: [
+				65536,
+			]
+			unit: "bytes"
+		}
 	}
 	tls: {
 		description:   "Configures the TLS options for incoming/outgoing connections."

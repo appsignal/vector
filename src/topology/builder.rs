@@ -175,16 +175,15 @@ pub async fn build_pieces(
             // maintained for compatibility
             component_name = %key.id(),
         );
+        let _entered_span = span.enter();
+
         let task_name = format!(
             ">> {} ({}, pump) >>",
             source.inner.get_component_name(),
             key.id()
         );
 
-        let mut builder = {
-            let _span = span.enter();
-            SourceSender::builder().with_buffer(*SOURCE_SENDER_BUFFER_SIZE)
-        };
+        let mut builder = SourceSender::builder().with_buffer(*SOURCE_SENDER_BUFFER_SIZE);
         let mut pumps = Vec::new();
         let mut controls = HashMap::new();
         let mut schema_definitions = HashMap::with_capacity(source_outputs.len());
@@ -270,7 +269,8 @@ pub async fn build_pieces(
             schema_definitions,
             schema: config.schema,
         };
-        let server = match source.inner.build(context).await {
+        let source = source.inner.build(context).await;
+        let server = match source {
             Err(error) => {
                 errors.push(format!("Source \"{}\": {}", key, error));
                 continue;
@@ -438,7 +438,7 @@ pub async fn build_pieces(
         } else {
             let buffer_type = match sink.buffer.stages().first().expect("cant ever be empty") {
                 BufferType::Memory { .. } => "memory",
-                BufferType::DiskV1 { .. } | BufferType::DiskV2 { .. } => "disk",
+                BufferType::DiskV2 { .. } => "disk",
             };
             let buffer_span = error_span!(
                 "sink",

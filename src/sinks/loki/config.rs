@@ -33,10 +33,10 @@ pub enum ExtendedCompression {
 #[serde(untagged)]
 pub enum CompressionConfigAdapter {
     /// Basic compression.
-    Original(#[configurable(derived)] Compression),
+    Original(Compression),
 
     /// Loki-specific compression.
-    Extended(#[configurable(derived)] ExtendedCompression),
+    Extended(ExtendedCompression),
 }
 
 impl CompressionConfigAdapter {
@@ -91,17 +91,15 @@ pub struct LokiConfig {
     ///
     /// Both keys and values are templateable, which enables you to attach dynamic labels to events.
     ///
-    /// Labels can be suffixed with a “*” to allow the expansion of objects into multiple labels,
-    /// see “How it works” for more information.
+    /// Labels can be suffixed with a `*` to allow the expansion of objects into multiple labels,
+    /// see [Label expansion][label_expansion] for more information.
     ///
     /// Note: If the set of labels has high cardinality, this can cause drastic performance issues
     /// with Loki. To prevent this from happening, reduce the number of unique label keys and
     /// values.
-    #[configurable(metadata(
-        docs::examples = "vector",
-        docs::examples = "{{ event_field }}",
-        docs::examples = "{{ kubernetes.pod_labels }}",
-    ))]
+    ///
+    /// [label_expansion]: https://vector.dev/docs/reference/configuration/sinks/loki/#label-expansion
+    #[configurable(metadata(docs::examples = "loki_labels_examples()"))]
     #[configurable(metadata(docs::additional_props_description = "A Loki label."))]
     pub labels: HashMap<Template, Template>,
 
@@ -144,6 +142,20 @@ pub struct LokiConfig {
         skip_serializing_if = "crate::serde::skip_serializing_if_default"
     )]
     acknowledgements: AcknowledgementsConfig,
+}
+
+fn loki_labels_examples() -> HashMap<String, String> {
+    let mut examples = HashMap::new();
+    examples.insert("source".to_string(), "vector".to_string());
+    examples.insert(
+        "pod_labels_*".to_string(),
+        "{{ kubernetes.pod_labels }}".to_string(),
+    );
+    examples.insert(
+        "{{ event_field }}".to_string(),
+        "{{ some_other_event_field }}".to_string(),
+    );
+    examples
 }
 
 #[derive(Clone, Copy, Debug, Default)]

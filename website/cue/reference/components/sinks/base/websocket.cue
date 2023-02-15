@@ -37,10 +37,10 @@ base: components: sinks: websocket: configuration: {
 		required: false
 		type: object: options: {
 			password: {
-				description:   "The password to send."
+				description:   "The basic authentication password."
 				relevant_when: "strategy = \"basic\""
 				required:      true
-				type: string: {}
+				type: string: examples: ["${PASSWORD}", "password"]
 			}
 			strategy: {
 				description: "The authentication strategy to use."
@@ -61,16 +61,16 @@ base: components: sinks: websocket: configuration: {
 				}
 			}
 			token: {
-				description:   "The bearer token to send."
+				description:   "The bearer authentication token."
 				relevant_when: "strategy = \"bearer\""
 				required:      true
 				type: string: {}
 			}
 			user: {
-				description:   "The username to send."
+				description:   "The basic authentication username."
 				relevant_when: "strategy = \"basic\""
 				required:      true
-				type: string: {}
+				type: string: examples: ["${USERNAME}", "username"]
 			}
 		}
 	}
@@ -138,9 +138,10 @@ base: components: sinks: websocket: configuration: {
 						could lead to the encoding emitting empty strings for the given event.
 						"""
 					text: """
-						Plaintext encoding.
+						Plain text encoding.
 
-						This "encoding" simply uses the `message` field of a log event.
+						This "encoding" simply uses the `message` field of a log event. For metrics, it uses an
+						encoding that resembles the Prometheus export format.
 
 						Users should take care if they're modifying their log events (such as by using a `remap`
 						transform, etc) and removing the message field while doing additional parsing on it, as this
@@ -152,6 +153,27 @@ base: components: sinks: websocket: configuration: {
 				description: "List of fields that will be excluded from the encoded event."
 				required:    false
 				type: array: items: type: string: {}
+			}
+			metric_tag_values: {
+				description: """
+					Controls how metric tag values are encoded.
+
+					When set to `single`, only the last non-bare value of tags will be displayed with the
+					metric.  When set to `full`, all metric tags will be exposed as separate assignments.
+					"""
+				relevant_when: "codec = \"json\" or codec = \"text\""
+				required:      false
+				type: string: {
+					default: "single"
+					enum: {
+						full: "All tags will be exposed as arrays of either string or null values."
+						single: """
+															Tag values will be exposed as single strings, the same as they were before this config
+															option. Tags with multiple values will show the last assigned value, and null values will be
+															ignored.
+															"""
+					}
+				}
 			}
 			only_fields: {
 				description: "List of fields that will be included in the encoded event."
@@ -169,18 +191,29 @@ base: components: sinks: websocket: configuration: {
 		}
 	}
 	ping_interval: {
-		description: "The interval, in seconds, between sending PINGs to the remote peer."
-		required:    false
-		type: uint: {}
+		description: """
+			The interval, in seconds, between sending [Ping][ping]s to the remote peer.
+
+			If this option is not configured, pings are not sent on an interval.
+
+			If the `ping_timeout` is not set, pings are still sent but there is no expectation of pong
+			response times.
+
+			[ping]: https://www.rfc-editor.org/rfc/rfc6455#section-5.5.2
+			"""
+		required: false
+		type: uint: unit: "seconds"
 	}
 	ping_timeout: {
 		description: """
-			The timeout, in seconds, while waiting for a PONG response from the remote peer.
+			The number of seconds to wait for a [Pong][pong] response from the remote peer.
 
-			If a response is not received in this time, the connection is reestablished.
+			If a response is not received within this time, the connection is re-established.
+
+			[pong]: https://www.rfc-editor.org/rfc/rfc6455#section-5.5.3
 			"""
 		required: false
-		type: uint: {}
+		type: uint: unit: "seconds"
 	}
 	tls: {
 		description: "Configures the TLS options for incoming/outgoing connections."

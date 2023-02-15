@@ -39,7 +39,7 @@ base: components: sinks: pulsar: configuration: {
 					When used for JWT, the value should be `token`.
 					"""
 				required: false
-				type: string: {}
+				type: string: examples: ["${PULSAR_NAME}", "name123"]
 			}
 			oauth2: {
 				description: "OAuth2-specific authentication configuration."
@@ -48,7 +48,7 @@ base: components: sinks: pulsar: configuration: {
 					audience: {
 						description: "The OAuth2 audience."
 						required:    false
-						type: string: {}
+						type: string: examples: ["${OAUTH2_AUDIENCE}", "pulsar"]
 					}
 					credentials_url: {
 						description: """
@@ -57,17 +57,17 @@ base: components: sinks: pulsar: configuration: {
 																A data URL is also supported.
 																"""
 						required: true
-						type: string: {}
+						type: string: examples: ["{OAUTH2_CREDENTIALS_URL}", "file:///oauth2_credentials", "data:application/json;base64,cHVsc2FyCg=="]
 					}
 					issuer_url: {
 						description: "The issuer URL."
 						required:    true
-						type: string: {}
+						type: string: examples: ["${OAUTH2_ISSUER_URL}", "https://oauth2.issuer"]
 					}
 					scope: {
 						description: "The OAuth2 scope."
 						required:    false
-						type: string: {}
+						type: string: examples: ["${OAUTH2_SCOPE}", "admin"]
 					}
 				}
 			}
@@ -79,7 +79,19 @@ base: components: sinks: pulsar: configuration: {
 					When used for JWT, the value should be the signed JWT, in the compact representation.
 					"""
 				required: false
-				type: string: {}
+				type: string: examples: ["${PULSAR_TOKEN}", "123456789"]
+			}
+		}
+	}
+	batch: {
+		description: "Event batching behavior."
+		required:    false
+		type: object: options: batch_size: {
+			description: "The maximum size of a batch, in events, before it is flushed."
+			required:    false
+			type: uint: {
+				examples: [1000]
+				unit: "events"
 			}
 		}
 	}
@@ -161,9 +173,10 @@ base: components: sinks: pulsar: configuration: {
 						could lead to the encoding emitting empty strings for the given event.
 						"""
 					text: """
-						Plaintext encoding.
+						Plain text encoding.
 
-						This "encoding" simply uses the `message` field of a log event.
+						This "encoding" simply uses the `message` field of a log event. For metrics, it uses an
+						encoding that resembles the Prometheus export format.
 
 						Users should take care if they're modifying their log events (such as by using a `remap`
 						transform, etc) and removing the message field while doing additional parsing on it, as this
@@ -175,6 +188,27 @@ base: components: sinks: pulsar: configuration: {
 				description: "List of fields that will be excluded from the encoded event."
 				required:    false
 				type: array: items: type: string: {}
+			}
+			metric_tag_values: {
+				description: """
+					Controls how metric tag values are encoded.
+
+					When set to `single`, only the last non-bare value of tags will be displayed with the
+					metric.  When set to `full`, all metric tags will be exposed as separate assignments.
+					"""
+				relevant_when: "codec = \"json\" or codec = \"text\""
+				required:      false
+				type: string: {
+					default: "single"
+					enum: {
+						full: "All tags will be exposed as arrays of either string or null values."
+						single: """
+															Tag values will be exposed as single strings, the same as they were before this config
+															option. Tags with multiple values will show the last assigned value, and null values will be
+															ignored.
+															"""
+					}
+				}
 			}
 			only_fields: {
 				description: "List of fields that will be included in the encoded event."
@@ -192,14 +226,18 @@ base: components: sinks: pulsar: configuration: {
 		}
 	}
 	endpoint: {
-		description: "The endpoint to which the Pulsar client should connect to."
-		required:    true
-		type: string: {}
+		description: """
+			The endpoint to which the Pulsar client should connect to.
+
+			The endpoint should specify the pulsar protocol and port.
+			"""
+		required: true
+		type: string: examples: ["pulsar://127.0.0.1:6650"]
 	}
 	partition_key_field: {
 		description: "Log field to use as Pulsar message key."
 		required:    false
-		type: string: {}
+		type: string: examples: ["message", "my_field"]
 	}
 	producer_name: {
 		description: "The name of the producer. If not specified, the default name assigned by Pulsar will be used."
@@ -209,6 +247,6 @@ base: components: sinks: pulsar: configuration: {
 	topic: {
 		description: "The Pulsar topic name to write events to."
 		required:    true
-		type: string: {}
+		type: string: examples: ["topic-1234"]
 	}
 }
