@@ -11,7 +11,7 @@ mod integration_tests;
 
 use std::task::Poll;
 
-use http::{header::AUTHORIZATION, Request, Uri};
+use http::{header::AUTHORIZATION, Request, StatusCode, Uri};
 use hyper::Body;
 use serde_json::json;
 
@@ -35,7 +35,7 @@ use super::util::http::HttpStatusRetryLogic;
 
 /// Configuration for the `appsignal` sink.
 #[configurable_component(sink("appsignal", "AppSignal sink."))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AppsignalConfig {
     /// The URI for the AppSignal API to send data to.
     #[configurable(validation(format = "uri"))]
@@ -115,11 +115,7 @@ impl AppsignalConfig {
     }
 }
 
-impl GenerateConfig for AppsignalConfig {
-    fn generate_config() -> toml::Value {
-        toml::from_str("").unwrap()
-    }
-}
+impl_generate_config_from_default!(AppsignalConfig);
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "appsignal")]
@@ -335,7 +331,6 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
 
     fn call(&mut self, mut request: AppsignalRequest) -> Self::Future {
         let metadata = std::mem::take(request.metadata_mut());
-        let json_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
         let body = hyper::Body::from(request.payload);
         let req = http::Request::post(&self.endpoint)
             .header("Content-Type", "application/json")
@@ -351,14 +346,10 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
         Box::pin(async move {
             match client.call(req).await {
                 Ok(response) => {
-                    if response.status().is_success() {
-                        Ok(AppsignalResponse {
-                            http_status: response.status(),
-                            json_byte_size,
-                        })
-                    } else {
-                        Err("received error response")
-                    }
+                    Ok(AppsignalResponse {
+                        http_status: response.status(),
+                        request_metadata: metadata,
+                    })
                 }
                 Err(_error) => Err("oops"),
             }
@@ -367,17 +358,28 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
 }
 
 struct AppsignalResponse {
-    http_status: http::StatusCode,
-    json_byte_size: GroupedCountByteSize,
+    http_status: StatusCode,
+    request_metadata: RequestMetadata,
 }
 
 impl DriverResponse for AppsignalResponse {
     fn event_status(&self) -> EventStatus {
-        EventStatus::Delivered
+        if self.http_status.is_success() {
+            EventStatus::Delivered
+        } else if self.http_status.is_client_error() {
+            EventStatus::Rejected
+        } else {
+            EventStatus::Errored
+        }
     }
 
     fn events_sent(&self) -> &GroupedCountByteSize {
-        &self.json_byte_size
+        self.request_metadata
+            .events_estimated_json_encoded_byte_size()
+    }
+
+    fn bytes_sent(&self) -> Option<usize> {
+        Some(self.request_metadata.request_wire_size())
     }
 }
 
@@ -399,13 +401,35 @@ mod test {
     use serde::Deserialize;
     use vector_core::event::{Event, LogEvent};
 
-    use crate::config::{GenerateConfig, SinkConfig, SinkContext};
+    use crate::{
+        config::{GenerateConfig, SinkConfig, SinkContext},
+        test_util::{
+            components::{run_and_assert_sink_compliance, HTTP_SINK_TAGS},
+            http::{always_200_response, spawn_blackhole_http_server},
+        },
+    };
 
     use super::{endpoint_uri, AppsignalConfig};
 
     #[test]
     fn generate_config() {
         crate::test_util::test_generate_config::<AppsignalConfig>();
+    }
+
+    #[tokio::test]
+    async fn component_spec_compliance() {
+        let mock_endpoint = spawn_blackhole_http_server(always_200_response).await;
+
+        let config = AppsignalConfig::generate_config().to_string();
+        let mut config = AppsignalConfig::deserialize(toml::de::ValueDeserializer::new(&config))
+            .expect("config should be valid");
+        config.endpoint = mock_endpoint.to_string();
+
+        let context = SinkContext::default();
+        let (sink, _healthcheck) = config.build(context).await.unwrap();
+
+        let event = Event::Log(LogEvent::from("simple message"));
+        run_and_assert_sink_compliance(sink, stream::once(ready(event)), &HTTP_SINK_TAGS).await;
     }
 
     #[test]
