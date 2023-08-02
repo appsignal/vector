@@ -11,13 +11,13 @@ mod integration_tests;
 
 use std::task::Poll;
 
-use http::header::AUTHORIZATION;
+use http::{header::AUTHORIZATION, Uri};
 use serde_json::json;
 
 use crate::{
     http::HttpClient,
     internal_events::SinkRequestBuildError,
-    sinks::{prelude::*, util::encoding::Encoder},
+    sinks::{prelude::*, util::encoding::Encoder, BuildError},
 };
 use bytes::Bytes;
 use vector_common::sensitive_string::SensitiveString;
@@ -85,7 +85,7 @@ impl SinkConfig for AppsignalConfig {
 
 #[derive(Debug, Clone)]
 struct AppsignalSink {
-    endpoint: String,
+    endpoint: Uri,
     push_api_key: SensitiveString,
     client: HttpClient,
     transformer: Transformer,
@@ -95,7 +95,7 @@ impl AppsignalSink {
     pub fn new(config: &AppsignalConfig) -> crate::Result<Self> {
         let tls = TlsSettings::from_options(&None).unwrap();
         let client = HttpClient::new(tls, &Default::default()).unwrap();
-        let endpoint = config.endpoint.clone();
+        let endpoint = endpoint_uri(&config.endpoint, "vector/events")?;
         let push_api_key = config.push_api_key.clone();
         let transformer = config.transformer.clone();
 
@@ -249,10 +249,11 @@ impl RequestBuilder<Event> for AppsignalRequestBuilder {
 }
 
 struct AppsignalService {
-    endpoint: String,
+    endpoint: Uri,
     push_api_key: SensitiveString,
     client: HttpClient,
 }
+
 impl tower::Service<AppsignalRequest> for AppsignalService {
     type Response = AppsignalResponse;
     type Error = &'static str;
@@ -306,5 +307,51 @@ impl DriverResponse for AppsignalResponse {
 
     fn events_sent(&self) -> &GroupedCountByteSize {
         &self.json_byte_size
+    }
+}
+
+fn endpoint_uri(endpoint: &str, path: &str) -> crate::Result<Uri> {
+    let uri = if endpoint.ends_with('/') {
+        format!("{endpoint}{path}")
+    } else {
+        format!("{endpoint}/{path}")
+    };
+    match uri.parse::<Uri>() {
+        Ok(u) => Ok(u),
+        Err(e) => Err(Box::new(BuildError::UriParseError { source: e })),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use futures::{future::ready, stream};
+    use serde::Deserialize;
+    use vector_core::event::{Event, LogEvent};
+
+    use crate::config::{GenerateConfig, SinkConfig, SinkContext};
+
+    use super::{endpoint_uri, AppsignalConfig};
+
+    #[test]
+    fn generate_config() {
+        crate::test_util::test_generate_config::<AppsignalConfig>();
+    }
+
+    #[test]
+    fn endpoint_uri_with_path() {
+        let uri = endpoint_uri("https://appsignal-endpoint.net", "vector/events");
+        assert_eq!(
+            uri.expect("Not a valid URI").to_string(),
+            "https://appsignal-endpoint.net/vector/events"
+        );
+    }
+
+    #[test]
+    fn endpoint_uri_with_trailing_slash() {
+        let uri = endpoint_uri("https://appsignal-endpoint.net/", "vector/events");
+        assert_eq!(
+            uri.expect("Not a valid URI").to_string(),
+            "https://appsignal-endpoint.net/vector/events"
+        );
     }
 }
