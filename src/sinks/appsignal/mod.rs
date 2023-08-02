@@ -25,7 +25,12 @@ use crate::{
 };
 use bytes::Bytes;
 use vector_common::sensitive_string::SensitiveString;
-use vector_core::config::telemetry;
+use vector_core::{
+    config::{proxy::ProxyConfig, telemetry},
+    tls::{MaybeTlsSettings, TlsEnableableConfig},
+};
+
+use super::util::http::HttpStatusRetryLogic;
 
 /// Configuration for the `appsignal` sink.
 #[configurable_component(sink("appsignal", "AppSignal sink."))]
@@ -54,16 +59,59 @@ pub struct AppsignalConfig {
     transformer: Transformer,
 
     #[configurable(derived)]
+    #[serde(default)]
+    request: TowerRequestConfig,
+
+    #[configurable(derived)]
+    tls: Option<TlsEnableableConfig>,
+
+    #[configurable(derived)]
     #[serde(
         default,
         deserialize_with = "crate::serde::bool_or_struct",
         skip_serializing_if = "crate::serde::skip_serializing_if_default"
     )]
-    pub acknowledgements: AcknowledgementsConfig,
+    acknowledgements: AcknowledgementsConfig,
 }
 
 fn default_endpoint() -> String {
     "https://appsignal-endpoint.net".to_string()
+}
+
+impl AppsignalConfig {
+    fn build_client(&self, proxy: &ProxyConfig) -> crate::Result<HttpClient> {
+        let tls = MaybeTlsSettings::from_config(&self.tls, false)?;
+        let client = HttpClient::new(tls, proxy)?;
+        Ok(client)
+    }
+
+    fn build_sink(&self, client: HttpClient) -> crate::Result<VectorSink> {
+        let endpoint = endpoint_uri(&self.endpoint, "vector/events")?;
+        let push_api_key = self.push_api_key.clone();
+        let service = AppsignalService {
+            endpoint,
+            push_api_key,
+            client,
+        };
+
+        let request_opts = self.request;
+        let request_settings = request_opts.unwrap_with(&TowerRequestConfig::default());
+        let retry_logic = HttpStatusRetryLogic::new(|req: &AppsignalResponse| req.http_status);
+
+        let service = ServiceBuilder::new()
+            .settings(request_settings, retry_logic)
+            .service(service);
+
+        let compression = self.compression.clone();
+        let transformer = self.transformer.clone();
+        let sink = AppsignalSink {
+            service,
+            compression,
+            transformer,
+        };
+
+        Ok(VectorSink::from_event_streamsink(sink))
+    }
 }
 
 impl GenerateConfig for AppsignalConfig {
@@ -75,9 +123,10 @@ impl GenerateConfig for AppsignalConfig {
 #[async_trait::async_trait]
 #[typetag::serde(name = "appsignal")]
 impl SinkConfig for AppsignalConfig {
-    async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
+    async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
+        let client = self.build_client(cx.proxy())?;
         let healthcheck = Box::pin(async move { Ok(()) });
-        let sink = VectorSink::from_event_streamsink(AppsignalSink::new(self)?);
+        let sink = self.build_sink(client)?;
 
         Ok((sink, healthcheck))
     }
@@ -91,41 +140,23 @@ impl SinkConfig for AppsignalConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-struct AppsignalSink {
-    endpoint: Uri,
-    push_api_key: SensitiveString,
-    client: HttpClient,
+struct AppsignalSink<S> {
+    service: S,
     compression: Compression,
     transformer: Transformer,
 }
 
-impl AppsignalSink {
-    pub fn new(config: &AppsignalConfig) -> crate::Result<Self> {
-        let tls = TlsSettings::from_options(&None).unwrap();
-        let client = HttpClient::new(tls, &Default::default()).unwrap();
-        let endpoint = endpoint_uri(&config.endpoint, "vector/events")?;
-        let push_api_key = config.push_api_key.clone();
-        let compression = config.compression.clone();
-        let transformer = config.transformer.clone();
-
-        Ok(Self {
-            client,
-            endpoint,
-            push_api_key,
-            compression,
-            transformer,
-        })
-    }
-
+impl<S> AppsignalSink<S>
+where
+    S: Service<AppsignalRequest> + Send + 'static,
+    S::Future: Send + 'static,
+    S::Response: DriverResponse + Send + 'static,
+    S::Error: std::fmt::Debug + Into<crate::Error> + Send,
+{
     async fn run_inner(self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
-        let service = tower::ServiceBuilder::new().service(AppsignalService {
-            client: self.client.clone(),
-            endpoint: self.endpoint.clone(),
-            push_api_key: self.push_api_key.clone(),
-        });
+        let service = tower::ServiceBuilder::new().service(self.service);
 
-        let sink = input
+        input
             .request_builder(
                 None,
                 AppsignalRequestBuilder {
@@ -144,14 +175,20 @@ impl AppsignalSink {
                     Ok(req) => Some(req),
                 }
             })
-            .into_driver(service);
-
-        sink.run().await
+            .into_driver(service)
+            .run()
+            .await
     }
 }
 
 #[async_trait::async_trait]
-impl StreamSink<Event> for AppsignalSink {
+impl<S> StreamSink<Event> for AppsignalSink<S>
+where
+    S: Service<AppsignalRequest> + Send + 'static,
+    S::Future: Send + 'static,
+    S::Response: DriverResponse + Send + 'static,
+    S::Error: std::fmt::Debug + Into<crate::Error> + Send,
+{
     async fn run(
         self: Box<Self>,
         input: futures_util::stream::BoxStream<'_, Event>,
@@ -261,6 +298,7 @@ impl RequestBuilder<Event> for AppsignalRequestBuilder {
     }
 }
 
+#[derive(Clone)]
 struct AppsignalService {
     endpoint: Uri,
     push_api_key: SensitiveString,
@@ -298,7 +336,10 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
             match client.call(req).await {
                 Ok(response) => {
                     if response.status().is_success() {
-                        Ok(AppsignalResponse { json_byte_size })
+                        Ok(AppsignalResponse {
+                            http_status: response.status(),
+                            json_byte_size,
+                        })
                     } else {
                         Err("received error response")
                     }
@@ -310,6 +351,7 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
 }
 
 struct AppsignalResponse {
+    http_status: http::StatusCode,
     json_byte_size: GroupedCountByteSize,
 }
 
