@@ -6,6 +6,9 @@
 //!
 //! Logs and metrics are stored on an per app basis and require an app-level Push API key.
 
+#[cfg(all(test, feature = "appsignal-integration-tests"))]
+mod integration_tests;
+
 use std::task::Poll;
 
 use crate::{

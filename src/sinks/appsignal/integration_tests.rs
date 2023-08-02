@@ -4,7 +4,7 @@ use vector_core::event::{BatchNotifier, BatchStatus, Event, Metric, MetricKind, 
 
 use crate::{
     config::SinkConfig,
-    sinks::appsignal::AppsignalSinkConfig,
+    sinks::appsignal::AppsignalConfig,
     sinks::util::test::load_sink,
     test_util::{
         components::{
@@ -24,7 +24,7 @@ async fn logs_real_endpoint() {
         .expect("couldn't find the AppSignal push API key in environment variables");
     assert!(!api_key.is_empty(), "$TEST_APPSIGNAL_PUSH_API_KEY required");
     let config = config.replace("${TEST_APPSIGNAL_PUSH_API_KEY}", &api_key);
-    let (config, cx) = load_sink::<AppsignalSinkConfig>(config.as_str()).unwrap();
+    let (config, cx) = load_sink::<AppsignalConfig>(config.as_str()).unwrap();
 
     let (sink, _) = config.build(cx).await.unwrap();
     let (batch, receiver) = BatchNotifier::new_with_receiver();
@@ -46,7 +46,7 @@ async fn metrics_real_endpoint() {
             .expect("couldn't find the AppSignal push API key in environment variables");
         assert!(!api_key.is_empty(), "$TEST_APPSIGNAL_PUSH_API_KEY required");
         let config = config.replace("${TEST_APPSIGNAL_PUSH_API_KEY}", &api_key);
-        let (config, cx) = load_sink::<AppsignalSinkConfig>(config.as_str()).unwrap();
+        let (config, cx) = load_sink::<AppsignalConfig>(config.as_str()).unwrap();
 
         let (sink, _) = config.build(cx).await.unwrap();
         let (batch, receiver) = BatchNotifier::new_with_receiver();
@@ -75,7 +75,7 @@ async fn error_scenario_real_endpoint() {
         let config = indoc! {r#"
             push_api_key = "invalid key"
         "#};
-        let (config, cx) = load_sink::<AppsignalSinkConfig>(config).unwrap();
+        let (config, cx) = load_sink::<AppsignalConfig>(config).unwrap();
 
         let (sink, _) = config.build(cx).await.unwrap();
         let (batch, receiver) = BatchNotifier::new_with_receiver();
