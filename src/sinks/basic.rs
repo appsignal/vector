@@ -1,9 +1,9 @@
 //! `Basic` sink.
 //! A sink that will send it's output to standard out for pedagogical purposes.
 
-use crate::prelude::*;
 use std::task::Poll;
 
+use crate::sinks::basic::encoding::Encoder;
 use crate::{http::HttpClient, internal_events::SinkRequestBuildError, sinks::prelude::*};
 use bytes::Bytes;
 
@@ -40,7 +40,7 @@ impl GenerateConfig for BasicConfig {
 impl SinkConfig for BasicConfig {
     async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let healthcheck = Box::pin(async move { Ok(()) });
-        let sink = VectorSink::from_event_streamsink(BasicSink);
+        let sink = VectorSink::from_event_streamsink(BasicSink::new(self));
 
         Ok((sink, healthcheck))
     }
@@ -109,12 +109,14 @@ impl StreamSink<Event> for BasicSink {
 
 #[derive(Clone)]
 struct BasicEncoder;
+
 impl Encoder<Event> for BasicEncoder {
     fn encode_input(
         &self,
-        input: Event,
-        writer: &mut dyn std::io::Write,
-    ) -> std::io::Result<usize> {
+        _input: Event,
+        _writer: &mut dyn std::io::Write,
+    ) -> std::io::Result<(usize, GroupedCountByteSize)> {
+        Err(std::io::Error::from(std::io::ErrorKind::Other))
     }
 }
 
@@ -126,8 +128,12 @@ struct BasicRequest {
 }
 
 impl MetaDescriptive for BasicRequest {
-    fn get_metadata(&self) -> RequestMetadata {
-        self.metadata
+    fn get_metadata(&self) -> &RequestMetadata {
+        &self.metadata
+    }
+
+    fn metadata_mut(&mut self) -> &mut RequestMetadata {
+        &mut self.metadata
     }
 }
 
@@ -135,6 +141,10 @@ impl Finalizable for BasicRequest {
     fn take_finalizers(&mut self) -> EventFinalizers {
         self.finalizers.take_finalizers()
     }
+}
+
+struct BasicRequestBuilder {
+    encoder: BasicEncoder,
 }
 
 impl RequestBuilder<Event> for BasicRequestBuilder {
@@ -158,7 +168,8 @@ impl RequestBuilder<Event> for BasicRequestBuilder {
         mut input: Event,
     ) -> (Self::Metadata, RequestMetadataBuilder, Self::Events) {
         let finalizers = input.take_finalizers();
-        let metadata_builder = RequestMetadataBuilder::from_events(&input);
+        let metadata_builder = RequestMetadataBuilder::from_event(&input);
+
         (finalizers, metadata_builder, input)
     }
 
@@ -192,8 +203,9 @@ impl tower::Service<BasicRequest> for BasicService {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, request: BasicRequest) -> Self::Future {
-        let byte_size = request.payload.len();
+    fn call(&mut self, mut request: BasicRequest) -> Self::Future {
+        let metadata = std::mem::take(request.metadata_mut());
+        let json_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
         let body = hyper::Body::from(request.payload);
         let req = http::Request::post(&self.endpoint)
             .header("Content-Type", "application/json")
@@ -206,7 +218,7 @@ impl tower::Service<BasicRequest> for BasicService {
             match client.call(req).await {
                 Ok(response) => {
                     if response.status().is_success() {
-                        Ok(BasicResponse { byte_size })
+                        Ok(BasicResponse { json_byte_size })
                     } else {
                         Err("received error response")
                     }
@@ -218,7 +230,7 @@ impl tower::Service<BasicRequest> for BasicService {
 }
 
 struct BasicResponse {
-    byte_size: usize,
+    json_byte_size: GroupedCountByteSize,
 }
 
 impl DriverResponse for BasicResponse {
@@ -226,8 +238,7 @@ impl DriverResponse for BasicResponse {
         EventStatus::Delivered
     }
 
-    fn events_sent(&self) -> RequestCountByteSize {
-        // (events count, byte size)
-        CountByteSize(1, self.byte_size).into()
+    fn events_sent(&self) -> &GroupedCountByteSize {
+        &self.json_byte_size
     }
 }
