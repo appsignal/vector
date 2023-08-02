@@ -11,6 +11,7 @@ mod integration_tests;
 
 use std::task::Poll;
 
+use http::header::AUTHORIZATION;
 use serde_json::json;
 
 use crate::{
@@ -19,6 +20,7 @@ use crate::{
     sinks::{prelude::*, util::encoding::Encoder},
 };
 use bytes::Bytes;
+use vector_common::sensitive_string::SensitiveString;
 use vector_core::config::telemetry;
 
 /// Configuration for the `appsignal` sink.
@@ -30,6 +32,11 @@ pub struct AppsignalConfig {
     #[configurable(metadata(docs::examples = "https://appsignal-endpoint.net"))]
     #[serde(default = "default_endpoint")]
     endpoint: String,
+
+    /// A valid app-level AppSignal Push API key.
+    #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+    #[configurable(metadata(docs::examples = "${APPSIGNAL_PUSH_API_KEY}"))]
+    push_api_key: SensitiveString,
 
     #[configurable(derived)]
     #[serde(
@@ -79,6 +86,7 @@ impl SinkConfig for AppsignalConfig {
 #[derive(Debug, Clone)]
 struct AppsignalSink {
     endpoint: String,
+    push_api_key: SensitiveString,
     client: HttpClient,
     transformer: Transformer,
 }
@@ -88,11 +96,13 @@ impl AppsignalSink {
         let tls = TlsSettings::from_options(&None).unwrap();
         let client = HttpClient::new(tls, &Default::default()).unwrap();
         let endpoint = config.endpoint.clone();
+        let push_api_key = config.push_api_key.clone();
         let transformer = config.transformer.clone();
 
         Ok(Self {
             client,
             endpoint,
+            push_api_key,
             transformer,
         })
     }
@@ -101,6 +111,7 @@ impl AppsignalSink {
         let service = tower::ServiceBuilder::new().service(AppsignalService {
             client: self.client.clone(),
             endpoint: self.endpoint.clone(),
+            push_api_key: self.push_api_key.clone(),
         });
 
         let sink = input
@@ -239,6 +250,7 @@ impl RequestBuilder<Event> for AppsignalRequestBuilder {
 
 struct AppsignalService {
     endpoint: String,
+    push_api_key: SensitiveString,
     client: HttpClient,
 }
 impl tower::Service<AppsignalRequest> for AppsignalService {
@@ -259,6 +271,10 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
         let body = hyper::Body::from(request.payload);
         let req = http::Request::post(&self.endpoint)
             .header("Content-Type", "application/json")
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.push_api_key.inner()),
+            )
             .body(body)
             .unwrap();
 
