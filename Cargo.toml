@@ -606,6 +606,7 @@ transforms-throttle = ["dep:governor"]
 sinks = ["sinks-logs", "sinks-metrics"]
 sinks-logs = [
   "sinks-amqp",
+  "sinks-basic",
   "sinks-appsignal",
   "sinks-aws_cloudwatch_logs",
   "sinks-aws_kinesis_firehose",
@@ -664,6 +665,7 @@ sinks-metrics = [
 ]
 
 sinks-amqp = ["lapin"]
+sinks-basic = []
 sinks-appsignal = []
 sinks-aws_cloudwatch_logs = ["aws-core", "dep:aws-sdk-cloudwatchlogs"]
 sinks-aws_cloudwatch_metrics = ["aws-core", "dep:aws-sdk-cloudwatch"]
