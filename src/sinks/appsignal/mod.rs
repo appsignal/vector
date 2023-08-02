@@ -11,12 +11,15 @@ mod integration_tests;
 
 use std::task::Poll;
 
+use serde_json::json;
+
 use crate::{
     http::HttpClient,
     internal_events::SinkRequestBuildError,
     sinks::{prelude::*, util::encoding::Encoder},
 };
 use bytes::Bytes;
+use vector_core::config::telemetry;
 
 /// Configuration for the `appsignal` sink.
 #[configurable_component(sink("appsignal", "AppSignal sink."))]
@@ -27,6 +30,13 @@ pub struct AppsignalConfig {
     #[configurable(metadata(docs::examples = "https://appsignal-endpoint.net"))]
     #[serde(default = "default_endpoint")]
     endpoint: String,
+
+    #[configurable(derived)]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::serde::skip_serializing_if_default"
+    )]
+    transformer: Transformer,
 
     #[configurable(derived)]
     #[serde(
@@ -52,13 +62,13 @@ impl GenerateConfig for AppsignalConfig {
 impl SinkConfig for AppsignalConfig {
     async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let healthcheck = Box::pin(async move { Ok(()) });
-        let sink = VectorSink::from_event_streamsink(AppsignalSink::new(self));
+        let sink = VectorSink::from_event_streamsink(AppsignalSink::new(self)?);
 
         Ok((sink, healthcheck))
     }
 
     fn input(&self) -> Input {
-        Input::log()
+        Input::new(DataType::Metric | DataType::Log)
     }
 
     fn acknowledgements(&self) -> &AcknowledgementsConfig {
@@ -70,15 +80,21 @@ impl SinkConfig for AppsignalConfig {
 struct AppsignalSink {
     endpoint: String,
     client: HttpClient,
+    transformer: Transformer,
 }
 
 impl AppsignalSink {
-    pub fn new(config: &AppsignalConfig) -> Self {
+    pub fn new(config: &AppsignalConfig) -> crate::Result<Self> {
         let tls = TlsSettings::from_options(&None).unwrap();
         let client = HttpClient::new(tls, &Default::default()).unwrap();
         let endpoint = config.endpoint.clone();
+        let transformer = config.transformer.clone();
 
-        Self { client, endpoint }
+        Ok(Self {
+            client,
+            endpoint,
+            transformer,
+        })
     }
 
     async fn run_inner(self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
@@ -91,7 +107,9 @@ impl AppsignalSink {
             .request_builder(
                 None,
                 AppsignalRequestBuilder {
-                    encoder: AppsignalEncoder,
+                    encoder: AppsignalEncoder {
+                        transformer: self.transformer.clone(),
+                    },
                 },
             )
             .filter_map(|request| async move {
@@ -120,15 +138,35 @@ impl StreamSink<Event> for AppsignalSink {
 }
 
 #[derive(Clone)]
-struct AppsignalEncoder;
+struct AppsignalEncoder {
+    pub transformer: crate::codecs::Transformer,
+}
 
 impl Encoder<Event> for AppsignalEncoder {
     fn encode_input(
         &self,
-        _input: Event,
-        _writer: &mut dyn std::io::Write,
+        mut event: Event,
+        writer: &mut dyn std::io::Write,
     ) -> std::io::Result<(usize, GroupedCountByteSize)> {
-        Err(std::io::Error::from(std::io::ErrorKind::Other))
+        self.transformer.transform(&mut event);
+
+        let mut byte_size = telemetry().create_request_count_byte_size();
+        byte_size.add_event(&event, event.estimated_json_encoded_size_of());
+
+        let json = match event {
+            Event::Log(log) => json!({ "log": log }),
+            Event::Metric(metric) => json!({ "metric": metric }),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("The AppSignal sink does not support this type of event: {event:?}"),
+                ))
+            }
+        };
+        let body = json.to_string().bytes().collect::<Vec<u8>>();
+        write_all(writer, 1, &body)?;
+
+        Ok((body.len(), byte_size))
     }
 }
 
