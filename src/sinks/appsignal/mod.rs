@@ -11,7 +11,8 @@ mod integration_tests;
 
 use std::task::Poll;
 
-use http::{header::AUTHORIZATION, Uri};
+use http::{header::AUTHORIZATION, Request, Uri};
+use hyper::Body;
 use serde_json::json;
 
 use crate::{
@@ -125,7 +126,12 @@ impl GenerateConfig for AppsignalConfig {
 impl SinkConfig for AppsignalConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let client = self.build_client(cx.proxy())?;
-        let healthcheck = Box::pin(async move { Ok(()) });
+        let healthcheck = healthcheck(
+            endpoint_uri(&self.endpoint, "vector/healthcheck")?,
+            self.push_api_key.to_string(),
+            client.clone(),
+        )
+        .boxed();
         let sink = self.build_sink(client)?;
 
         Ok((sink, healthcheck))
@@ -137,6 +143,16 @@ impl SinkConfig for AppsignalConfig {
 
     fn acknowledgements(&self) -> &AcknowledgementsConfig {
         &self.acknowledgements
+    }
+}
+
+async fn healthcheck(uri: Uri, push_api_key: String, client: HttpClient) -> crate::Result<()> {
+    let request = Request::get(uri).header(AUTHORIZATION, format!("Bearer {}", push_api_key));
+    let response = client.send(request.body(Body::empty()).unwrap()).await?;
+
+    match response.status() {
+        status if status.is_success() => Ok(()),
+        other => Err(super::HealthcheckError::UnexpectedStatus { status: other }.into()),
     }
 }
 
