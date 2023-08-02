@@ -17,7 +17,11 @@ use serde_json::json;
 use crate::{
     http::HttpClient,
     internal_events::SinkRequestBuildError,
-    sinks::{prelude::*, util::encoding::Encoder, BuildError},
+    sinks::{
+        prelude::*,
+        util::{encoding::Encoder, Compression},
+        BuildError,
+    },
 };
 use bytes::Bytes;
 use vector_common::sensitive_string::SensitiveString;
@@ -37,6 +41,10 @@ pub struct AppsignalConfig {
     #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
     #[configurable(metadata(docs::examples = "${APPSIGNAL_PUSH_API_KEY}"))]
     push_api_key: SensitiveString,
+
+    #[configurable(derived)]
+    #[serde(default = "Compression::gzip_default")]
+    compression: Compression,
 
     #[configurable(derived)]
     #[serde(
@@ -88,6 +96,7 @@ struct AppsignalSink {
     endpoint: Uri,
     push_api_key: SensitiveString,
     client: HttpClient,
+    compression: Compression,
     transformer: Transformer,
 }
 
@@ -97,12 +106,14 @@ impl AppsignalSink {
         let client = HttpClient::new(tls, &Default::default()).unwrap();
         let endpoint = endpoint_uri(&config.endpoint, "vector/events")?;
         let push_api_key = config.push_api_key.clone();
+        let compression = config.compression.clone();
         let transformer = config.transformer.clone();
 
         Ok(Self {
             client,
             endpoint,
             push_api_key,
+            compression,
             transformer,
         })
     }
@@ -118,6 +129,7 @@ impl AppsignalSink {
             .request_builder(
                 None,
                 AppsignalRequestBuilder {
+                    compression: self.compression.clone(),
                     encoder: AppsignalEncoder {
                         transformer: self.transformer.clone(),
                     },
@@ -206,6 +218,7 @@ impl Finalizable for AppsignalRequest {
 
 struct AppsignalRequestBuilder {
     encoder: AppsignalEncoder,
+    compression: Compression,
 }
 
 impl RequestBuilder<Event> for AppsignalRequestBuilder {
@@ -217,7 +230,7 @@ impl RequestBuilder<Event> for AppsignalRequestBuilder {
     type Error = std::io::Error;
 
     fn compression(&self) -> Compression {
-        Compression::None
+        self.compression
     }
 
     fn encoder(&self) -> &Self::Encoder {
