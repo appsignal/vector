@@ -22,14 +22,11 @@ use bytes::Bytes;
 #[configurable_component(sink("appsignal", "AppSignal sink."))]
 #[derive(Clone, Debug)]
 pub struct AppsignalConfig {
-    /// The endpoint to send HTTP traffic to.
-    ///
-    /// This should include the protocol and host, but can also include the port, path, and any other valid part of a URI.
-    #[configurable(metadata(
-        docs::examples = "http://localhost:3000/",
-        docs::examples = "http://example.com/endpoint/",
-    ))]
-    pub endpoint: String,
+    /// The URI for the AppSignal API to send data to.
+    #[configurable(validation(format = "uri"))]
+    #[configurable(metadata(docs::examples = "https://appsignal-endpoint.net"))]
+    #[serde(default = "default_endpoint")]
+    endpoint: String,
 
     #[configurable(derived)]
     #[serde(
@@ -38,6 +35,10 @@ pub struct AppsignalConfig {
         skip_serializing_if = "crate::serde::skip_serializing_if_default"
     )]
     pub acknowledgements: AcknowledgementsConfig,
+}
+
+fn default_endpoint() -> String {
+    "https://appsignal-endpoint.net".to_string()
 }
 
 impl GenerateConfig for AppsignalConfig {
