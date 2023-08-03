@@ -13,14 +13,18 @@ use std::task::Poll;
 
 use http::{header::AUTHORIZATION, Request, StatusCode, Uri};
 use hyper::Body;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     http::HttpClient,
     internal_events::SinkRequestBuildError,
     sinks::{
         prelude::*,
-        util::{encoding::Encoder, Compression},
+        util::{
+            encoding::{as_tracked_write, Encoder},
+            http::HttpStatusRetryLogic,
+            Compression,
+        },
         BuildError,
     },
 };
@@ -30,8 +34,6 @@ use vector_core::{
     config::{proxy::ProxyConfig, telemetry},
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
-
-use super::util::http::HttpStatusRetryLogic;
 
 /// Configuration for the `appsignal` sink.
 #[configurable_component(sink("appsignal", "AppSignal sink."))]
@@ -53,11 +55,15 @@ pub struct AppsignalConfig {
     compression: Compression,
 
     #[configurable(derived)]
+    #[serde(default)]
+    batch: BatchConfig<AppsignalDefaultBatchSettings>,
+
+    #[configurable(derived)]
     #[serde(
         default,
         skip_serializing_if = "crate::serde::skip_serializing_if_default"
     )]
-    transformer: Transformer,
+    encoding: Transformer,
 
     #[configurable(derived)]
     #[serde(default)]
@@ -79,6 +85,15 @@ fn default_endpoint() -> String {
     "https://appsignal-endpoint.net".to_string()
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct AppsignalDefaultBatchSettings;
+
+impl SinkBatchSettings for AppsignalDefaultBatchSettings {
+    const MAX_EVENTS: Option<usize> = Some(100);
+    const MAX_BYTES: Option<usize> = Some(450_000);
+    const TIMEOUT_SECS: f64 = 1.0;
+}
+
 impl AppsignalConfig {
     fn build_client(&self, proxy: &ProxyConfig) -> crate::Result<HttpClient> {
         let tls = MaybeTlsSettings::from_config(&self.tls, false)?;
@@ -87,6 +102,8 @@ impl AppsignalConfig {
     }
 
     fn build_sink(&self, client: HttpClient) -> crate::Result<VectorSink> {
+        let batch_settings = self.batch.into_batcher_settings()?;
+
         let endpoint = endpoint_uri(&self.endpoint, "vector/events")?;
         let push_api_key = self.push_api_key.clone();
         let service = AppsignalService {
@@ -104,11 +121,12 @@ impl AppsignalConfig {
             .service(service);
 
         let compression = self.compression.clone();
-        let transformer = self.transformer.clone();
+        let transformer = self.encoding.clone();
         let sink = AppsignalSink {
             service,
             compression,
             transformer,
+            batch_settings,
         };
 
         Ok(VectorSink::from_event_streamsink(sink))
@@ -156,6 +174,7 @@ struct AppsignalSink<S> {
     service: S,
     compression: Compression,
     transformer: Transformer,
+    batch_settings: BatcherSettings,
 }
 
 impl<S> AppsignalSink<S>
@@ -169,6 +188,7 @@ where
         let service = tower::ServiceBuilder::new().service(self.service);
 
         input
+            .batched(self.batch_settings.into_byte_size_config())
             .request_builder(
                 None,
                 AppsignalRequestBuilder {
@@ -214,31 +234,42 @@ struct AppsignalEncoder {
     pub transformer: crate::codecs::Transformer,
 }
 
-impl Encoder<Event> for AppsignalEncoder {
+impl Encoder<Vec<Event>> for AppsignalEncoder {
     fn encode_input(
         &self,
-        mut event: Event,
+        events: Vec<Event>,
         writer: &mut dyn std::io::Write,
     ) -> std::io::Result<(usize, GroupedCountByteSize)> {
-        self.transformer.transform(&mut event);
-
+        let mut result = Value::Array(Vec::new());
         let mut byte_size = telemetry().create_request_count_byte_size();
-        byte_size.add_event(&event, event.estimated_json_encoded_size_of());
+        for mut event in events {
+            self.transformer.transform(&mut event);
 
-        let json = match event {
-            Event::Log(log) => json!({ "log": log }),
-            Event::Metric(metric) => json!({ "metric": metric }),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("The AppSignal sink does not support this type of event: {event:?}"),
-                ))
+            byte_size.add_event(&event, event.estimated_json_encoded_size_of());
+
+            let json = match event {
+                Event::Log(log) => json!({ "log": log }),
+                Event::Metric(metric) => json!({ "metric": metric }),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "The AppSignal sink does not support this type of event: {event:?}"
+                        ),
+                    ))
+                }
+            };
+            if let Value::Array(ref mut array) = result {
+                array.push(json);
             }
-        };
-        let body = json.to_string().bytes().collect::<Vec<u8>>();
-        write_all(writer, 1, &body)?;
+        }
+        let written_bytes =
+            as_tracked_write::<_, _, std::io::Error>(writer, &result, |mut writer, value| {
+                serde_json::to_writer(&mut writer, value)?;
+                Ok(())
+            })?;
 
-        Ok((body.len(), byte_size))
+        Ok((written_bytes, byte_size))
     }
 }
 
@@ -270,9 +301,9 @@ struct AppsignalRequestBuilder {
     compression: Compression,
 }
 
-impl RequestBuilder<Event> for AppsignalRequestBuilder {
+impl RequestBuilder<Vec<Event>> for AppsignalRequestBuilder {
     type Metadata = EventFinalizers;
-    type Events = Event;
+    type Events = Vec<Event>;
     type Encoder = AppsignalEncoder;
     type Payload = Bytes;
     type Request = AppsignalRequest;
@@ -288,10 +319,10 @@ impl RequestBuilder<Event> for AppsignalRequestBuilder {
 
     fn split_input(
         &self,
-        mut input: Event,
+        mut input: Vec<Event>,
     ) -> (Self::Metadata, RequestMetadataBuilder, Self::Events) {
         let finalizers = input.take_finalizers();
-        let metadata_builder = RequestMetadataBuilder::from_event(&input);
+        let metadata_builder = RequestMetadataBuilder::from_events(&input);
 
         (finalizers, metadata_builder, input)
     }
