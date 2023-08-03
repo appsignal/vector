@@ -9,7 +9,7 @@ use crate::{
     test_util::{
         components::{
             assert_sink_compliance, assert_sink_error, run_and_assert_sink_compliance,
-            COMPONENT_ERROR_TAGS, SINK_TAGS,
+            COMPONENT_ERROR_TAGS, HTTP_SINK_TAGS,
         },
         generate_lines_with_stream, map_event_batch_stream,
     },
@@ -31,14 +31,14 @@ async fn logs_real_endpoint() {
     let generator = |index| format!("this is a log with index {}", index);
     let (_, events) = generate_lines_with_stream(generator, 10, Some(batch));
 
-    run_and_assert_sink_compliance(sink, events, &SINK_TAGS).await;
+    run_and_assert_sink_compliance(sink, events, &HTTP_SINK_TAGS).await;
 
     assert_eq!(receiver.await, BatchStatus::Delivered);
 }
 
 #[tokio::test]
 async fn metrics_real_endpoint() {
-    assert_sink_compliance(&SINK_TAGS, async {
+    assert_sink_compliance(&HTTP_SINK_TAGS, async {
         let config = indoc! {r#"
             push_api_key = "${TEST_APPSIGNAL_PUSH_API_KEY}"
         "#};

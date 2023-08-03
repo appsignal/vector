@@ -11,9 +11,14 @@ mod integration_tests;
 
 use std::task::Poll;
 
+use futures::{
+    future,
+    future::{BoxFuture, Ready},
+};
 use http::{header::AUTHORIZATION, Request, StatusCode, Uri};
 use hyper::Body;
 use serde_json::{json, Value};
+use tower::{Service, ServiceBuilder, ServiceExt};
 
 use crate::{
     http::HttpClient,
@@ -22,7 +27,9 @@ use crate::{
         prelude::*,
         util::{
             encoding::{as_tracked_write, Encoder},
+            http::HttpBatchService,
             http::HttpStatusRetryLogic,
+            sink::Response,
             Compression,
         },
         BuildError,
@@ -101,17 +108,12 @@ impl AppsignalConfig {
         Ok(client)
     }
 
-    fn build_sink(&self, client: HttpClient) -> crate::Result<VectorSink> {
+    fn build_sink(&self, http_client: HttpClient) -> crate::Result<VectorSink> {
         let batch_settings = self.batch.into_batcher_settings()?;
 
         let endpoint = endpoint_uri(&self.endpoint, "vector/events")?;
-        let protocol = get_protocol(&endpoint);
         let push_api_key = self.push_api_key.clone();
-        let service = AppsignalService {
-            endpoint,
-            push_api_key,
-            client,
-        };
+        let service = AppsignalService::new(http_client, endpoint, push_api_key);
 
         let request_opts = self.request;
         let request_settings = request_opts.unwrap_with(&TowerRequestConfig::default());
@@ -128,7 +130,6 @@ impl AppsignalConfig {
             compression,
             transformer,
             batch_settings,
-            protocol,
         };
 
         Ok(VectorSink::from_event_streamsink(sink))
@@ -136,10 +137,6 @@ impl AppsignalConfig {
 }
 
 impl_generate_config_from_default!(AppsignalConfig);
-
-fn get_protocol(endpoint: &Uri) -> String {
-    endpoint.scheme_str().unwrap_or("http").to_string()
-}
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "appsignal")]
@@ -181,7 +178,6 @@ struct AppsignalSink<S> {
     compression: Compression,
     transformer: Transformer,
     batch_settings: BatcherSettings,
-    protocol: String,
 }
 
 impl<S> AppsignalSink<S>
@@ -192,7 +188,7 @@ where
     S::Error: std::fmt::Debug + Into<crate::Error> + Send,
 {
     async fn run_inner(self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
-        let service = tower::ServiceBuilder::new().service(self.service);
+        let service = ServiceBuilder::new().service(self.service);
 
         input
             .batched(self.batch_settings.into_byte_size_config())
@@ -215,7 +211,6 @@ where
                 }
             })
             .into_driver(service)
-            .protocol(self.protocol)
             .run()
             .await
     }
@@ -304,6 +299,12 @@ impl Finalizable for AppsignalRequest {
     }
 }
 
+impl ByteSizeOf for AppsignalRequest {
+    fn allocated_bytes(&self) -> usize {
+        self.payload.allocated_bytes() + self.finalizers.allocated_bytes()
+    }
+}
+
 struct AppsignalRequestBuilder {
     encoder: AppsignalEncoder,
     compression: Compression,
@@ -351,14 +352,34 @@ impl RequestBuilder<Vec<Event>> for AppsignalRequestBuilder {
 
 #[derive(Clone)]
 struct AppsignalService {
-    endpoint: Uri,
-    push_api_key: SensitiveString,
-    client: HttpClient,
+    batch_service:
+        HttpBatchService<Ready<Result<http::Request<Bytes>, crate::Error>>, AppsignalRequest>,
 }
 
-impl tower::Service<AppsignalRequest> for AppsignalService {
+impl AppsignalService {
+    pub fn new(
+        http_client: HttpClient<Body>,
+        endpoint: Uri,
+        push_api_key: SensitiveString,
+    ) -> Self {
+        let batch_service = HttpBatchService::new(http_client, move |req| {
+            let req: AppsignalRequest = req;
+
+            let request = Request::post(&endpoint)
+                .header("Content-Type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", push_api_key.inner()))
+                .header("Content-Length", req.payload.len())
+                .body(req.payload)
+                .map_err(|x| x.into());
+            future::ready(request)
+        });
+        Self { batch_service }
+    }
+}
+
+impl Service<AppsignalRequest> for AppsignalService {
     type Response = AppsignalResponse;
-    type Error = &'static str;
+    type Error = crate::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(
@@ -369,59 +390,49 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
     }
 
     fn call(&mut self, mut request: AppsignalRequest) -> Self::Future {
-        let metadata = std::mem::take(request.metadata_mut());
-        let body = hyper::Body::from(request.payload);
-        let req = http::Request::post(&self.endpoint)
-            .header("Content-Type", "application/json")
-            .header(
-                AUTHORIZATION,
-                format!("Bearer {}", self.push_api_key.inner()),
-            )
-            .body(body)
-            .unwrap();
-
-        let mut client = self.client.clone();
+        let mut http_service = self.batch_service.clone();
 
         Box::pin(async move {
-            match client.call(req).await {
-                Ok(response) => {
-                    Ok(AppsignalResponse {
-                        http_status: response.status(),
-                        request_metadata: metadata,
-                    })
-                }
-                Err(_error) => {
-                    // TODO: better error message or snafu
-                    Err("oops")
-                }
-            }
+            let metadata = std::mem::take(request.metadata_mut());
+            http_service.ready().await?;
+            let bytes_sent = metadata.request_wire_size();
+            let event_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
+            let http_response = http_service.call(request).await?;
+            let event_status = if http_response.is_successful() {
+                EventStatus::Delivered
+            } else if http_response.is_transient() {
+                EventStatus::Errored
+            } else {
+                EventStatus::Rejected
+            };
+            Ok(AppsignalResponse {
+                event_status,
+                http_status: http_response.status(),
+                event_byte_size,
+                bytes_sent,
+            })
         })
     }
 }
 
 struct AppsignalResponse {
+    event_status: EventStatus,
     http_status: StatusCode,
-    request_metadata: RequestMetadata,
+    event_byte_size: GroupedCountByteSize,
+    bytes_sent: usize,
 }
 
 impl DriverResponse for AppsignalResponse {
     fn event_status(&self) -> EventStatus {
-        if self.http_status.is_success() {
-            EventStatus::Delivered
-        } else if self.http_status.is_client_error() {
-            EventStatus::Rejected
-        } else {
-            EventStatus::Errored
-        }
+        self.event_status
     }
 
     fn events_sent(&self) -> &GroupedCountByteSize {
-        self.request_metadata
-            .events_estimated_json_encoded_byte_size()
+        &self.event_byte_size
     }
 
     fn bytes_sent(&self) -> Option<usize> {
-        Some(self.request_metadata.request_wire_size())
+        Some(self.bytes_sent)
     }
 }
 
