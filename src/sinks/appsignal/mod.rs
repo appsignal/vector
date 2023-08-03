@@ -105,6 +105,7 @@ impl AppsignalConfig {
         let batch_settings = self.batch.into_batcher_settings()?;
 
         let endpoint = endpoint_uri(&self.endpoint, "vector/events")?;
+        let protocol = get_protocol(&endpoint);
         let push_api_key = self.push_api_key.clone();
         let service = AppsignalService {
             endpoint,
@@ -127,6 +128,7 @@ impl AppsignalConfig {
             compression,
             transformer,
             batch_settings,
+            protocol,
         };
 
         Ok(VectorSink::from_event_streamsink(sink))
@@ -134,6 +136,10 @@ impl AppsignalConfig {
 }
 
 impl_generate_config_from_default!(AppsignalConfig);
+
+fn get_protocol(endpoint: &Uri) -> String {
+    endpoint.scheme_str().unwrap_or("http").to_string()
+}
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "appsignal")]
@@ -175,6 +181,7 @@ struct AppsignalSink<S> {
     compression: Compression,
     transformer: Transformer,
     batch_settings: BatcherSettings,
+    protocol: String,
 }
 
 impl<S> AppsignalSink<S>
@@ -208,6 +215,7 @@ where
                 }
             })
             .into_driver(service)
+            .protocol(self.protocol)
             .run()
             .await
     }
@@ -382,7 +390,10 @@ impl tower::Service<AppsignalRequest> for AppsignalService {
                         request_metadata: metadata,
                     })
                 }
-                Err(_error) => Err("oops"),
+                Err(_error) => {
+                    // TODO: better error message or snafu
+                    Err("oops")
+                }
             }
         })
     }
