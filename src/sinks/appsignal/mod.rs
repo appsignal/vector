@@ -146,7 +146,7 @@ impl SinkConfig for AppsignalConfig {
         let client = self.build_client(cx.proxy())?;
         let healthcheck = healthcheck(
             endpoint_uri(&self.endpoint, "vector/healthcheck")?,
-            self.push_api_key.to_string(),
+            self.push_api_key.inner().to_string(),
             client.clone(),
         )
         .boxed();
