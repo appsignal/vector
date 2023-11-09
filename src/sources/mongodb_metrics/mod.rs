@@ -31,6 +31,8 @@ mod types;
 use types::{CommandBuildInfo, CommandIsMaster, CommandServerStatus, NodeType};
 use vector_core::config::LogNamespace;
 
+use self::types::CommandServerStatusOpLatenciesStat;
+
 macro_rules! tags {
     ($tags:expr) => { $tags.clone() };
     ($tags:expr, $($key:expr => $value:expr),*) => {
@@ -107,6 +109,12 @@ struct MongoDbMetrics {
     endpoint: String,
     namespace: Option<String>,
     tags: MetricTags,
+    state: Option<MongoDbState>,
+}
+
+#[derive(Clone, Debug)]
+struct MongoDbState {
+    op_latencies: std::collections::HashMap<String, CommandServerStatusOpLatenciesStat>
 }
 
 pub const fn default_scrape_interval_secs() -> Duration {
@@ -125,7 +133,7 @@ impl SourceConfig for MongoDbMetricsConfig {
     async fn build(&self, mut cx: SourceContext) -> crate::Result<super::Source> {
         let namespace = Some(self.namespace.clone()).filter(|namespace| !namespace.is_empty());
 
-        let sources = try_join_all(
+        let mut sources = try_join_all(
             self.endpoints
                 .iter()
                 .map(|endpoint| MongoDbMetrics::new(endpoint, namespace.clone())),
@@ -138,7 +146,7 @@ impl SourceConfig for MongoDbMetricsConfig {
             let mut interval = IntervalStream::new(time::interval(duration)).take_until(shutdown);
             while interval.next().await.is_some() {
                 let start = Instant::now();
-                let metrics = join_all(sources.iter().map(|mongodb| mongodb.collect())).await;
+                let metrics = join_all(sources.iter_mut().map(|mongodb| mongodb.collect())).await;
                 let count = metrics.len();
                 emit!(CollectionCompleted {
                     start,
@@ -186,6 +194,7 @@ impl MongoDbMetrics {
             endpoint,
             namespace,
             tags,
+            state: None
         })
     }
 
@@ -240,10 +249,10 @@ impl MongoDbMetrics {
             .with_timestamp(Some(Utc::now()))
     }
 
-    async fn collect(&self) -> Vec<Metric> {
+    async fn collect(&mut self) -> Vec<Metric> {
         // `up` metric is `1` if collection is successful, otherwise `0`.
-        let (up_value, mut metrics) = match self.collect_server_status().await {
-            Ok(metrics) => (1.0, metrics),
+        let (up_value, mut metrics, new_state) = match self.collect_server_status(self.state.clone()).await {
+            Ok((metrics, new_state)) => (1.0, metrics, new_state),
             Err(error) => {
                 match error {
                     CollectError::Mongo(error) => emit!(MongoDbMetricsRequestError {
@@ -256,7 +265,7 @@ impl MongoDbMetrics {
                     }),
                 }
 
-                (0.0, vec![])
+                (0.0, vec![], self.state.clone())
             }
         };
 
@@ -268,12 +277,14 @@ impl MongoDbMetrics {
             endpoint: &self.endpoint,
         });
 
+        self.state = new_state;
+
         metrics
     }
 
     /// Collect metrics from `serverStatus` command.
     /// <https://docs.mongodb.com/manual/reference/command/serverStatus/>
-    async fn collect_server_status(&self) -> Result<Vec<Metric>, CollectError> {
+    async fn collect_server_status(&self, state: Option<MongoDbState>) -> Result<(Vec<Metric>, Option<MongoDbState>), CollectError> {
         self.print_version().await?;
 
         let mut metrics = vec![];
@@ -642,7 +653,7 @@ impl MongoDbMetrics {
         ));
 
         // mongod_op_latencies_*
-        for (r#type, stat) in status.op_latencies {
+        for (r#type, stat) in status.op_latencies.clone() {
             for bucket in stat.histogram {
                 metrics.push(self.create_metric(
                     "mongod_op_latencies_histogram",
@@ -660,6 +671,24 @@ impl MongoDbMetrics {
                 gauge!(stat.ops),
                 tags!(self.tags, "type" => &r#type),
             ));
+
+            let state_stat_latency = state.clone().map(|state| {
+                state.op_latencies.get(&r#type).map(|stat| stat.latency).unwrap_or(0)
+            }).unwrap_or(0);
+
+            let stat_latency: i64 = stat.latency - state_stat_latency;
+
+            let state_stat_ops = state.clone().map(|state| {
+                state.op_latencies.get(&r#type).map(|stat| stat.ops).unwrap_or(0)
+            }).unwrap_or(0);
+
+            let stat_ops: i64 = stat.ops - state_stat_ops;
+
+            metrics.push(self.create_metric(
+                "mongod_op_latencies_latency_per_op",
+                gauge!(stat_latency.checked_div(stat_ops).unwrap_or(0)),
+                tags!(self.tags, "type" => &r#type),
+            ))
         }
 
         // mongod_storage_engine
@@ -968,7 +997,7 @@ impl MongoDbMetrics {
             ));
         }
 
-        Ok(metrics)
+        Ok((metrics, Some(MongoDbState { op_latencies: status.op_latencies.clone() })))
     }
 }
 

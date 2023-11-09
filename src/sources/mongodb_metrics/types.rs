@@ -270,7 +270,7 @@ pub struct CommandServerStatusMetricsReplTtl {
 }
 
 /// <https://docs.mongodb.com/manual/reference/operator/aggregation/collStats/#latency-stats-document>
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandServerStatusOpLatenciesStat {
     pub latency: i64,
@@ -278,7 +278,7 @@ pub struct CommandServerStatusOpLatenciesStat {
     pub histogram: Vec<CommandServerStatusOpLatenciesStatHistBucket>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct CommandServerStatusOpLatenciesStatHistBucket {
     pub(crate) micros: i64,
     pub count: i64,
